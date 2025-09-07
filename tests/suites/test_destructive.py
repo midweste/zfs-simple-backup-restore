@@ -51,33 +51,48 @@ def cleanup_test_pool():
         pass
 
 def test_backup_restore_cycle():
-    """Test a complete backup and restore cycle"""
+    """Test a complete backup and restore cycle with incremental backups"""
     dataset = setup_test_pool()
     backup_dir = tempfile.mkdtemp()
     
     try:
-        # Test backup
-        print("\n=== Testing Backup ===")
-        backup_cmd = [
-            "python3", "zfs_simple_backup_restore.py",
-            "--action", "backup",
-            "--dataset", dataset,
-            "--mount", backup_dir,
-            "--interval", "7",
-            "--retention", "1"
-        ]
-        run_cmd(backup_cmd)
+        # Initial backup (full)
+        print("\n=== Testing Initial Full Backup ===")
+        run_backup(dataset, backup_dir, "Initial backup")
         
-        # Verify backup files were created
-        chain_dirs = list(Path(backup_dir).glob("chain-*"))
+        # Get the chain directory
+        chain_dirs = list(Path(backup_dir).glob("chain-"))
         if not chain_dirs:
             raise Exception("No backup chain directories found")
         
-        backup_files = list(chain_dirs[0].glob("*.zfs.gz"))
-        if not backup_files:
-            raise Exception("No backup files found in chain directory")
+        # Verify initial backup files
+        initial_backups = list(chain_dirs[0].glob("*.zfs.gz"))
+        if len(initial_backups) != 1:
+            raise Exception(f"Expected 1 backup file, found {len(initial_backups)}")
         
-        print(f"Backup successful: {len(backup_files)} files created")
+        print(f"Initial backup successful: {initial_backups[0].name}")
+        
+        # Modify test files for incremental backup
+        print("\n=== Modifying test files ===")
+        test_file = "/testpool/data/test_file.txt"
+        with open(test_file, "a") as f:
+            f.write("Modified content for incremental backup\n")
+        
+        # Create a new file
+        new_file = "/testpool/data/new_file.txt"
+        with open(new_file, "w") as f:
+            f.write("This is a new file for incremental testing\n")
+        
+        # Create incremental backup
+        print("\n=== Testing Incremental Backup ===")
+        run_backup(dataset, backup_dir, "Incremental backup")
+        
+        # Verify incremental backup was created
+        incremental_backups = list(chain_dirs[0].glob("*.zfs.gz"))
+        if len(incremental_backups) != 2:
+            raise Exception(f"Expected 2 backup files, found {len(incremental_backups)}")
+        
+        print(f"Incremental backup successful: {incremental_backups[1].name}")
         
         # Test restore to a new pool
         print("\n=== Testing Restore ===")
@@ -91,16 +106,22 @@ def test_backup_restore_cycle():
         run_cmd(restore_cmd)
         
         # Verify restored data
-        restored_file = "/restored/data/test_file.txt"
-        if not os.path.exists(restored_file):
-            raise Exception("Restored file not found")
+        restored_files = [
+            ("/restored/data/test_file.txt", ["test data", "incremental"]),
+            ("/restored/data/new_file.txt", ["new file for incremental testing"])
+        ]
         
-        with open(restored_file, "r") as f:
-            content = f.read()
-            if "test data" not in content:
-                raise Exception("Restored file content is incorrect")
+        for file_path, expected_contents in restored_files:
+            if not os.path.exists(file_path):
+                raise Exception(f"Restored file not found: {file_path}")
+            
+            with open(file_path, "r") as f:
+                content = f.read()
+                for expected in expected_contents:
+                    if expected.lower() not in content.lower():
+                        raise Exception(f"Expected content '{expected}' not found in {file_path}")
         
-        print("Restore successful: data verified")
+        print("Restore successful: all files and modifications verified")
         
         # Clean up restored pool
         run_cmd(["zpool", "destroy", "restored"], check=False)
@@ -110,6 +131,19 @@ def test_backup_restore_cycle():
         # Clean up backup directory
         import shutil
         shutil.rmtree(backup_dir, ignore_errors=True)
+
+def run_backup(dataset, backup_dir, description):
+    """Helper function to run backup with common parameters"""
+    backup_cmd = [
+        "python3", "zfs_simple_backup_restore.py",
+        "--action", "backup",
+        "--dataset", dataset,
+        "--mount", backup_dir,
+        "--interval", "7",
+        "--retention", "3"  # Keep more backups for testing
+    ]
+    print(f"\nRunning backup: {description}")
+    run_cmd(backup_cmd)
 
 def main():
     """Run destructive integration tests"""
