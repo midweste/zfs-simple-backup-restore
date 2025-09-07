@@ -2,6 +2,8 @@
 
 Simple, atomic ZFS backup & restore tooling for file level zfs backups with chain-based full/differential backups, gzip/pigz compression, chain retention, and safe restore helpers.
 
+**Important:** This tool is designed to work with its own backup files and chain structure. While it can technically restore any gzipped ZFS stream, it should not be used as a general-purpose ZFS restore utility for backups created by other tools.
+
 This repository contains:
 
 - `zfs_simple_backup_restore.py` — main script and library code.
@@ -61,6 +63,7 @@ NOTES:
  • Requires root for zfs commands and permissions to write/read mount points.
  • Rate limiting requires pv(1) to be installed on the system.
  • All backups are gzip compressed (.gz), using pigz if available.
+ • This tool is optimized for its own backup chain structure - while it can restore gzipped ZFS streams, it's not recommended for general-purpose use with external backups.
  • Always test restores periodically!
 
 CRON JOB EXAMPLES:
