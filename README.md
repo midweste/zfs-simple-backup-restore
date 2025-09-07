@@ -25,10 +25,8 @@ The tool organizes backups into "chains" (folders named `chain-YYYYMMDD`). Each 
 
 Note: The repository includes tests that mock `subprocess.run` for many ZFS behaviors so unit tests are safe to run on a regular machine. Destructive (integration) tests that exercise ZFS must run inside an isolated environment (VM or privileged container).
 
-## Examples and usage (epilog)
-
-EXAMPLES:
-
+## Examples and usage
+```
   # 1. Run daily backup, full every Sunday, keep 2 weeks of backup chains
   sudo zfs-simple-backup-restore.py --action backup --dataset rpool/data --mount /mnt/backups/zfs --interval 7 --retention 2
 
@@ -72,6 +70,7 @@ CRON JOB EXAMPLES:
 # Run cleanup daily at 1:30am to prune old chains and orphaned snapshots.
 30 1 * * * root /usr/local/bin/zfs-simple-backup-restore.py --action cleanup --dataset rpool --mount /mnt/backups/zfs --retention 2
 --------------------------------------------------
+```
 
 ## Running the internal test suite (non-destructive)
 
