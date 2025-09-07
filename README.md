@@ -1,6 +1,6 @@
 # zfs-simple-backup-restore
 
-Simple, atomic ZFS backup & restore tooling with chain-based full/differential backups, gzip/pigz compression, chain retention, and safe restore helpers.
+Simple, atomic ZFS backup & restore tooling for file level zfs backups with chain-based full/differential backups, gzip/pigz compression, chain retention, and safe restore helpers.
 
 This repository contains:
 
@@ -11,6 +11,7 @@ This repository contains:
 
 The tool organizes backups into "chains" (folders named `chain-YYYYMMDD`). Each chain contains a full snapshot and zero-or-more differential snapshots. The script supports:
 
+- Backup to files - suitable for network shares and non zfs backup destinations
 - Creating full and differential backups
 - Restoring from a chain (latest by default)
 - Pruning old chains

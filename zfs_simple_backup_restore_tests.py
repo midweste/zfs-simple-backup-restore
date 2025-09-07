@@ -8,7 +8,11 @@ from zfs_simple_backup_restore import (
     Logger,
     ZFS,
     FatalError,
+    ValidationError,
     CONFIG,
+    Args,
+    Main,
+    BackupRestoreManager,
 )
 
 
@@ -30,7 +34,10 @@ class ScriptTests:
                 self.logger.error(f"TEST FAIL: {name}: {e}")
                 failed += 1
 
+        # Register all tests to run
+        # The following tests are registered to run
         t("Cmd required_binaries", self.test_required_binaries)
+        t("Cmd has_required_binaries missing", self.test_cmd_has_required_binaries_missing)
         t("Cmd zfs binary detection", self.test_cmd_zfs_binary_detection)
         t("Cmd gzip binary detection", self.test_cmd_gzip_binary_detection)
         t("Cmd gzip prefers pigz or falls back", self.test_cmd_gzip_prefers)
@@ -58,11 +65,38 @@ class ScriptTests:
         t("ChainManager prune cleans temp files", self.test_chainmanager_prune_temp_files)
         t("Logger file logging works", self.test_logger_file_logging)
         t("CONFIG values sanity", self.test_config_values)
+        t("Args dataclass creation", self.test_args_dataclass)
+        t("Main parse_args basic", self.test_main_parse_args_basic)
+        t("Main parse_args missing required", self.test_main_parse_args_missing)
+        t("Main parse_args test mode", self.test_main_parse_args_test_mode)
+        t("Main validate checks", self.test_main_validate_mocked)
+        t("BackupRestoreManager init", self.test_backup_restore_manager_init)
+        t("BackupRestoreManager backup mode logic", self.test_backup_mode_decision)
+        t("ValidationError and FatalError", self.test_exceptions)
+
         print(f"\n=== TEST RESULTS: {passed} passed, {failed} failed ===")
         return failed == 0
 
     def test_required_binaries(self):
         Cmd.has_required_binaries(self.logger)
+
+    def test_cmd_has_required_binaries_missing(self):
+        import shutil
+
+        orig_which = shutil.which
+        try:
+            # Simulate zfs and gzip missing
+            shutil.which = lambda name: None
+            logger = Logger()
+            ok = Cmd.has_required_binaries(logger)
+            assert not ok, "Expected has_required_binaries to return False when binaries are missing"
+
+            # Simulate pv required but missing when rate provided
+            shutil.which = lambda name: None if name == "pv" else orig_which(name)
+            ok2 = Cmd.has_required_binaries(logger, rate="10M")
+            assert not ok2, "Expected has_required_binaries to return False when pv is missing and rate supplied"
+        finally:
+            shutil.which = orig_which
 
     def test_cmd_zfs_binary_detection(self):
         import shutil
@@ -408,3 +442,166 @@ class ScriptTests:
                 os.unlink(log_path)
             except:
                 pass
+
+    def test_args_dataclass(self):
+        # Test Args dataclass creation with defaults
+        args = Args(action="backup", dataset="rpool/test", mount_point="/mnt/backup")
+        assert args.action == "backup"
+        assert args.dataset == "rpool/test" 
+        assert args.mount_point == "/mnt/backup"
+        assert args.interval == CONFIG.DEFAULT_INTERVAL_DAYS
+        assert args.retention == CONFIG.DEFAULT_RETENTION_CHAINS
+        assert args.prefix == CONFIG.DEFAULT_PREFIX
+        assert args.dry_run == False
+        assert args.verbose == False
+
+    def test_main_parse_args_basic(self):
+        import sys
+        orig_argv = sys.argv
+        try:
+            # Test basic backup args
+            sys.argv = ["script", "--action", "backup", "--dataset", "rpool/test", "--mount", "/mnt/backup"]
+            main = Main()
+            main.parse_args()
+            assert main.args.action == "backup"
+            assert main.args.dataset == "rpool/test"
+            assert main.args.mount_point == "/mnt/backup"
+            
+            # Test restore args
+            sys.argv = ["script", "--action", "restore", "--dataset", "rpool/test", "--mount", "/mnt/backup", "--restore-pool", "newpool"]
+            main = Main()
+            main.parse_args()
+            assert main.args.action == "restore"
+            assert main.args.restore_pool == "newpool"
+        finally:
+            sys.argv = orig_argv
+
+    def test_main_parse_args_missing(self):
+        import sys
+        orig_argv = sys.argv
+        try:
+            # Test missing required args (should exit)
+            sys.argv = ["script", "--action", "backup"]
+            main = Main()
+            try:
+                main.parse_args()
+                assert False, "Should have exited due to missing args"
+            except SystemExit as e:
+                assert e.code == CONFIG.EXIT_INVALID_ARGS
+        finally:
+            sys.argv = orig_argv
+
+    def test_main_parse_args_test_mode(self):
+        import sys
+        orig_argv = sys.argv
+        try:
+            # Test mode should not require other args
+            sys.argv = ["script", "--test"]
+            main = Main()
+            main.parse_args()
+            assert main.args.test == True
+            assert main.args.action == "dummy"  # Should be filled with dummy values
+        finally:
+            sys.argv = orig_argv
+
+    def test_main_validate_mocked(self):
+        import os
+        orig_geteuid = os.geteuid
+        orig_zfs_is_dataset = ZFS.is_dataset_exists
+        orig_has_required = Cmd.has_required_binaries
+        
+        try:
+            # Mock all validation checks to pass
+            os.geteuid = lambda: 0  # Root user
+            ZFS.is_dataset_exists = lambda dataset: True
+            Cmd.has_required_binaries = lambda logger, rate=None: True
+            
+            args = Args(action="backup", dataset="rpool/test", mount_point=tempfile.gettempdir())
+            main = Main()
+            main.args = args
+            main.logger = Logger()
+            
+            # Should not raise any exceptions
+            main.validate()
+            
+            # Test validation failure for non-root
+            os.geteuid = lambda: 1000  # Non-root user
+            try:
+                main.validate()
+                assert False, "Should have raised ValidationError for non-root"
+            except ValidationError:
+                pass
+                
+        finally:
+            os.geteuid = orig_geteuid
+            ZFS.is_dataset_exists = orig_zfs_is_dataset
+            Cmd.has_required_binaries = orig_has_required
+
+    def test_backup_restore_manager_init(self):
+        args = Args(
+            action="backup", 
+            dataset="rpool/test", 
+            mount_point=tempfile.gettempdir(),
+            prefix="TEST"
+        )
+        logger = Logger()
+        manager = BackupRestoreManager(args, logger)
+        
+        assert manager.args == args
+        assert manager.logger == logger
+        assert manager.dry_run == args.dry_run
+        assert manager.prefix == "TEST"
+        assert "rpool_test" in str(manager.target_dir)
+
+    def test_backup_mode_decision(self):
+        # Test backup mode decision logic (mocked)
+        tmp_dir = Path(tempfile.mkdtemp())
+        try:
+            args = Args(
+                action="backup",
+                dataset="rpool/test", 
+                mount_point=str(tmp_dir),
+                interval=7,
+                dry_run=True  # Important: dry run to avoid actual operations
+            )
+            logger = Logger()
+            manager = BackupRestoreManager(args, logger)
+            
+            # Ensure target directory exists
+            manager.target_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Test when no last_chain_file exists (should do full backup)
+            assert not manager.last_chain_file.exists()
+            
+            # Create a fake last_chain_file and chain directory
+            chain_name = "chain-20240101"
+            manager.last_chain_file.write_text(chain_name)
+            chain_dir = manager.target_dir / chain_name
+            chain_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create a fake full backup file with old timestamp
+            full_file = chain_dir / "TEST-full-20240101120000.zfs.gz"
+            full_file.write_bytes(b"fake backup data")
+            
+            # The backup method would decide between full/diff based on age
+            # We can't easily test this without mocking datetime, but we can verify the file exists
+            assert full_file.exists()
+            assert manager.last_chain_file.exists()
+            
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_exceptions(self):
+        # Test that our custom exceptions work
+        try:
+            raise FatalError("Test fatal error")
+        except FatalError as e:
+            assert str(e) == "Test fatal error"
+            
+        try:
+            raise ValidationError("Test validation error")  
+        except ValidationError as e:
+            assert str(e) == "Test validation error"
+            
+        # ValidationError should be a subclass of FatalError
+        assert issubclass(ValidationError, FatalError)

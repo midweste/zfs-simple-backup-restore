@@ -628,6 +628,13 @@ CRON JOB EXAMPLES:
             help="Run internal self-tests (non-destructive) and exit",
         )
         ns = parser.parse_args()
+        # If not running tests, require action/dataset/mount_point to be provided.
+        if not ns.test:
+            missing = [a for a in ("action", "dataset", "mount_point") if getattr(ns, a, None) is None]
+            if missing:
+                parser.print_usage()
+                sys.exit(CONFIG.EXIT_INVALID_ARGS)
+
         # argparse doesn't force required for args when --test, so fill with dummy values if test is set
         if ns.test:
             for arg in ["action", "dataset", "mount_point"]:
