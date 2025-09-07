@@ -18,6 +18,7 @@ run_tests() {
     else
         echo "❌ FAILED"
         # Show detailed output only if tests fail
+        echo "=== Test Output ==="
         python3 -m unittest $test_file
         test_results["$test_type"]=1
         return 1
@@ -102,9 +103,9 @@ fi
 
 # Exit with appropriate status
 if [ $all_passed -eq 0 ]; then
-    echo "\n🎉 All tests completed successfully!"
+    echo "🎉 All tests completed successfully!"
     exit 0
 else
-    echo "\n❌ Some tests failed"
+    echo "❌ Some tests failed"
     exit 1
 fi
