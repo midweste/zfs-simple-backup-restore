@@ -451,7 +451,7 @@ class ScriptTests:
         # Test Args dataclass creation with defaults
         args = Args(action="backup", dataset="rpool/test", mount_point="/mnt/backup")
         assert args.action == "backup"
-        assert args.dataset == "rpool/test" 
+        assert args.dataset == "rpool/test"
         assert args.mount_point == "/mnt/backup"
         assert args.interval == CONFIG.DEFAULT_INTERVAL_DAYS
         assert args.retention == CONFIG.DEFAULT_RETENTION_CHAINS
@@ -461,6 +461,7 @@ class ScriptTests:
 
     def test_main_parse_args_basic(self):
         import sys
+
         orig_argv = sys.argv
         try:
             # Test basic backup args
@@ -470,7 +471,7 @@ class ScriptTests:
             assert main.args.action == "backup"
             assert main.args.dataset == "rpool/test"
             assert main.args.mount_point == "/mnt/backup"
-            
+
             # Test restore args
             sys.argv = ["script", "--action", "restore", "--dataset", "rpool/test", "--mount", "/mnt/backup", "--restore-pool", "newpool"]
             main = Main()
@@ -482,6 +483,7 @@ class ScriptTests:
 
     def test_main_parse_args_missing(self):
         import sys
+
         orig_argv = sys.argv
         try:
             # Test missing required args (should exit)
@@ -497,6 +499,7 @@ class ScriptTests:
 
     def test_main_parse_args_test_mode(self):
         import sys
+
         orig_argv = sys.argv
         try:
             # Test mode should not require other args
@@ -510,24 +513,25 @@ class ScriptTests:
 
     def test_main_validate_mocked(self):
         import os
+
         orig_geteuid = os.geteuid
         orig_zfs_is_dataset = ZFS.is_dataset_exists
         orig_has_required = Cmd.has_required_binaries
-        
+
         try:
             # Mock all validation checks to pass
             os.geteuid = lambda: 0  # Root user
             ZFS.is_dataset_exists = lambda dataset: True
             Cmd.has_required_binaries = lambda logger, rate=None: True
-            
+
             args = Args(action="backup", dataset="rpool/test", mount_point=tempfile.gettempdir())
             main = Main()
             main.args = args
             main.logger = Logger()
-            
+
             # Should not raise any exceptions
             main.validate()
-            
+
             # Test validation failure for non-root
             os.geteuid = lambda: 1000  # Non-root user
             try:
@@ -535,22 +539,17 @@ class ScriptTests:
                 assert False, "Should have raised ValidationError for non-root"
             except ValidationError:
                 pass
-                
+
         finally:
             os.geteuid = orig_geteuid
             ZFS.is_dataset_exists = orig_zfs_is_dataset
             Cmd.has_required_binaries = orig_has_required
 
     def test_base_manager_init(self):
-        args = Args(
-            action="backup", 
-            dataset="rpool/test", 
-            mount_point=tempfile.gettempdir(),
-            prefix="TEST"
-        )
+        args = Args(action="backup", dataset="rpool/test", mount_point=tempfile.gettempdir(), prefix="TEST")
         logger = Logger()
         manager = BaseManager(args, logger)
-        
+
         assert manager.args == args
         assert manager.logger == logger
         assert manager.dry_run == args.dry_run
@@ -558,15 +557,10 @@ class ScriptTests:
         assert "rpool_test" in str(manager.target_dir)
 
     def test_backup_manager_init(self):
-        args = Args(
-            action="backup", 
-            dataset="rpool/test", 
-            mount_point=tempfile.gettempdir(),
-            prefix="TEST"
-        )
+        args = Args(action="backup", dataset="rpool/test", mount_point=tempfile.gettempdir(), prefix="TEST")
         logger = Logger()
         manager = BackupManager(args, logger)
-        
+
         assert manager.args == args
         assert manager.logger == logger
         assert manager.dry_run == args.dry_run
@@ -574,16 +568,10 @@ class ScriptTests:
         assert "rpool_test" in str(manager.target_dir)
 
     def test_restore_manager_init(self):
-        args = Args(
-            action="restore", 
-            dataset="rpool/test", 
-            mount_point=tempfile.gettempdir(),
-            restore_pool="newpool",
-            prefix="TEST"
-        )
+        args = Args(action="restore", dataset="rpool/test", mount_point=tempfile.gettempdir(), restore_pool="newpool", prefix="TEST")
         logger = Logger()
         manager = RestoreManager(args, logger)
-        
+
         assert manager.args == args
         assert manager.logger == logger
         assert manager.dry_run == args.dry_run
@@ -595,36 +583,32 @@ class ScriptTests:
         tmp_dir = Path(tempfile.mkdtemp())
         try:
             args = Args(
-                action="backup",
-                dataset="rpool/test", 
-                mount_point=str(tmp_dir),
-                interval=7,
-                dry_run=True  # Important: dry run to avoid actual operations
+                action="backup", dataset="rpool/test", mount_point=str(tmp_dir), interval=7, dry_run=True  # Important: dry run to avoid actual operations
             )
             logger = Logger()
             manager = BackupManager(args, logger)
-            
+
             # Ensure target directory exists
             manager.target_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # Test when no last_chain_file exists (should do full backup)
             assert not manager.last_chain_file.exists()
-            
+
             # Create a fake last_chain_file and chain directory
             chain_name = "chain-20240101"
             manager.last_chain_file.write_text(chain_name)
             chain_dir = manager.target_dir / chain_name
             chain_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # Create a fake full backup file with old timestamp
             full_file = chain_dir / "TEST-full-20240101120000.zfs.gz"
             full_file.write_bytes(b"fake backup data")
-            
+
             # The backup method would decide between full/diff based on age
             # We can't easily test this without mocking datetime, but we can verify the file exists
             assert full_file.exists()
             assert manager.last_chain_file.exists()
-            
+
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -634,11 +618,11 @@ class ScriptTests:
             raise FatalError("Test fatal error")
         except FatalError as e:
             assert str(e) == "Test fatal error"
-            
+
         try:
-            raise ValidationError("Test validation error")  
+            raise ValidationError("Test validation error")
         except ValidationError as e:
             assert str(e) == "Test validation error"
-            
+
         # ValidationError should be a subclass of FatalError
         assert issubclass(ValidationError, FatalError)

@@ -166,7 +166,6 @@ class Args:
     lockfile: str = None
     dry_run: bool = False
     verbose: bool = False
-    test: bool = False  # Added for test mode
 
 
 # ========== LockFile Context Manager ==========
@@ -732,11 +731,6 @@ If this is not what you want, press Ctrl-C now.
         self.logger.always("Restore done")
 
 
-# ========== Import ScriptTests from sibling file ==========
-try:
-    from zfs_simple_backup_restore_tests import ScriptTests
-except ImportError:
-    ScriptTests = None
 
 
 # ========== Main ==========
@@ -776,8 +770,6 @@ EXAMPLES:
   # 7. Dry-run restore (shows what would happen, does not run)
   sudo {CONFIG.SCRIPT_ID}.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored --dry-run
 
-  # 8. Internal test mode (non-destructive)
-  sudo {CONFIG.SCRIPT_ID}.py --test
 
 NOTES:
  • Each backup "chain" (full + differentials) is stored in its own folder: chain-YYYYMMDD
@@ -870,30 +862,16 @@ CRON JOB EXAMPLES:
             help="Show actions but do not run them",
         )
         parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
-        parser.add_argument(
-            "--test",
-            action="store_true",
-            help="Run internal self-tests (non-destructive) and exit",
-        )
         ns = parser.parse_args()
-        # If not running tests, require action/dataset/mount_point to be provided.
-        if not ns.test:
-            missing = [a for a in ("action", "dataset", "mount_point") if getattr(ns, a, None) is None]
-            if missing:
-                parser.print_usage()
-                sys.exit(CONFIG.EXIT_INVALID_ARGS)
-
-        # argparse doesn't force required for args when --test, so fill with dummy values if test is set
-        if ns.test:
-            for arg in ["action", "dataset", "mount_point"]:
-                if getattr(ns, arg, None) is None:
-                    setattr(ns, arg, "dummy")
+        # Require action/dataset/mount_point to be provided
+        missing = [a for a in ("action", "dataset", "mount_point") if getattr(ns, a, None) is None]
+        if missing:
+            parser.print_usage()
+            sys.exit(CONFIG.EXIT_INVALID_ARGS)
         self.args = Args(**vars(ns))
         self.logger = Logger(verbose=self.args.verbose)
 
     def validate(self) -> None:
-        if getattr(self.args, "test", False):
-            return
         if not Cmd.has_required_binaries(self.logger, self.args.rate):
             raise ValidationError("Missing required binaries.")
         if os.geteuid() != 0:
@@ -908,16 +886,6 @@ CRON JOB EXAMPLES:
 
     def run(self) -> None:
         self.parse_args()
-        if getattr(self.args, "test", False):
-            if ScriptTests is None:
-                print(
-                    "ScriptTests class not found! Please make sure zfs_simple_backup_restore_tests.py is present.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            tester = ScriptTests(self.logger)
-            success = tester.run_all()
-            sys.exit(0 if success else 1)
         try:
             self.validate()
             lockfile = Path(self.args.lockfile or CONFIG.get_default_lockfile())
@@ -929,17 +897,11 @@ CRON JOB EXAMPLES:
                     manager = RestoreManager(self.args, self.logger)
                     manager.restore()
                 elif self.args.action == "cleanup":
-                    manager = BaseManager(self.args, self.logger)
+                    manager = BackupManager(self.args, self.logger)
                     manager.cleanup()
-                else:
-                    self.logger.error("Unknown action.")
-                    sys.exit(CONFIG.EXIT_INVALID_ARGS)
-        except ValidationError as e:
+        except (ValidationError, FatalError) as e:
             self.logger.error(str(e))
-            sys.exit(CONFIG.EXIT_INVALID_ARGS)
-        except FatalError as e:
-            self.logger.error(str(e))
-            sys.exit(CONFIG.EXIT_INVALID_ARGS)
+            sys.exit(CONFIG.EXIT_FAILURE)
         except Exception as e:
             self.logger.error(f"Unexpected error: {e}")
             sys.exit(CONFIG.EXIT_INVALID_ARGS)

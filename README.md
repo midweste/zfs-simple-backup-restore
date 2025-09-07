@@ -7,7 +7,7 @@ Simple, atomic ZFS backup & restore tooling for file level zfs backups with chai
 This repository contains:
 
 - `zfs_simple_backup_restore.py` — main script and library code.
-- `zfs_simple_backup_restore_tests.py` — internal test suite (non-destructive unit-style tests).
+- `tests/` — test directory containing unit tests, Docker environment, and test runners.
 
 ## Quick overview
 
@@ -76,23 +76,83 @@ CRON JOB EXAMPLES:
 --------------------------------------------------
 ```
 
-## Running the internal test suite (non-destructive)
+## Testing
 
-Run the built-in tests (non-destructive/mocked):
+### Non-destructive unit tests
+
+Run the built-in unit tests (safe, mocked ZFS operations):
 
 ```bash
 python3 zfs_simple_backup_restore.py --test
 ```
 
-This will run the `ScriptTests` suite in `zfs_simple_backup_restore_tests.py` and print a simple pass/fail summary.
+## Testing
 
-## Destructive integration tests
+All tests must be run inside the Docker container to ensure proper isolation and safety. The test environment includes everything needed to run both unit and integration tests.
 
-Destructive integration tests that exercise real ZFS operations must be run in an isolated environment (a disposable VM or a dedicated CI runner with ZFS support). Do not run destructive tests on machines with data you care about. Prefer a VM or CI runner that can be destroyed and recreated.
+### Prerequisites
+
+- Docker installed on your system
+- ZFS kernel modules loaded on the host (for destructive tests)
+
+### Running Tests
+
+#### 1. Non-Destructive Unit Tests
+
+These tests are safe to run anywhere and don't require special privileges:
+
+```bash
+cd tests
+./test-runner.sh safe
+```
+
+#### 2. Destructive Integration Tests
+
+**WARNING**: These tests create and destroy ZFS pools and datasets. They must be run in a controlled environment.
+
+```bash
+cd tests
+./test-runner.sh destructive
+```
+
+#### 3. Interactive Development Shell
+
+For debugging or manual testing, start an interactive shell in the test environment:
+
+```bash
+cd tests
+./test-runner.sh shell
+```
+
+### Test Environment Details
+
+The test environment includes:
+- Ubuntu 22.04 base
+- Python 3 with all required dependencies
+- ZFS utilities and kernel modules
+- All required binaries (zfs, zpool, gzip, pigz, pv, etc.)
+
+### Running Specific Tests
+
+To run specific test cases or methods, use the interactive shell:
+
+```bash
+# Run a specific test class
+python3 -m unittest test_non_destructive.ScriptTests.test_specific_case
+
+# Run with more verbose output
+python3 -m unittest test_non_destructive.ScriptTests -v
+```
+
+The Docker environment provides:
+- Ubuntu 22.04 with ZFS utilities
+- Isolated test pools using file-based vdevs
+- Complete backup/restore cycle testing
+- Automatic cleanup after tests
 
 ## Adding tests
 
-- Unit tests in `zfs_simple_backup_restore_tests.py` currently mock `subprocess.run` for ZFS checks and cover the majority of logic. Consider adding:
+- Unit tests in `test_non_destructive.py` currently mock `subprocess.run` for ZFS checks and cover the majority of logic. Consider adding:
   - Integration tests that run in an isolated VM or CI environment (separate tests that actually call `zfs send` / `zfs receive`).
   - Tests for edge cases: corrupted `last_chain` file, missing mount point, partially written `.tmp` files.
 
