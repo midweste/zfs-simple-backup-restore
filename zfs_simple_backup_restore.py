@@ -291,8 +291,8 @@ class ZFS:
             subprocess.run(cmd, check=True, **kwargs)
 
 
-# ========== BackupRestoreManager ==========
-class BackupRestoreManager:
+# ========== Base Manager ==========
+class BaseManager:
     def __init__(self, args: Args, logger: Logger):
         self.args = args
         self.logger = logger
@@ -301,6 +301,14 @@ class BackupRestoreManager:
         self.last_chain_file = self.target_dir / "last_chain"
         self.prefix = args.prefix or CONFIG.DEFAULT_PREFIX
         self.chain = ChainManager(self.target_dir, self.prefix, logger)
+
+    def cleanup(self) -> None:
+        self.chain.prune_old(self.args.retention, dry_run=self.args.dry_run)
+        self.logger.always("Cleanup done")
+
+
+# ========== BackupManager ==========
+class BackupManager(BaseManager):
 
     def backup(self) -> None:
         os.makedirs(self.target_dir, exist_ok=True)
@@ -404,6 +412,10 @@ class BackupRestoreManager:
             else:
                 Path(tmpfile).rename(filename)
 
+
+# ========== RestoreManager ==========
+class RestoreManager(BaseManager):
+
     def restore(self) -> None:
         chain_dir = self.chain.chain_dir(self.args.restore_chain)
         dest = f"{self.args.restore_pool}/{self.args.dataset.split('/')[-1]}"
@@ -478,10 +490,6 @@ If this is not what you want, press Ctrl-C now.
             else:
                 self.logger.always(f"Dry-run: Would restore {f} to {dest}")
         self.logger.always("Restore done")
-
-    def cleanup(self) -> None:
-        self.chain.prune_old(self.args.retention, dry_run=self.args.dry_run)
-        self.logger.always("Cleanup done")
 
 
 # ========== Import ScriptTests from sibling file ==========
@@ -674,12 +682,14 @@ CRON JOB EXAMPLES:
             self.validate()
             lockfile = Path(self.args.lockfile or CONFIG.DEFAULT_LOCKFILE)
             with LockFile(lockfile, self.logger):
-                manager = BackupRestoreManager(self.args, self.logger)
                 if self.args.action == "backup":
+                    manager = BackupManager(self.args, self.logger)
                     manager.backup()
                 elif self.args.action == "restore":
+                    manager = RestoreManager(self.args, self.logger)
                     manager.restore()
                 elif self.args.action == "cleanup":
+                    manager = BaseManager(self.args, self.logger)
                     manager.cleanup()
                 else:
                     self.logger.error("Unknown action.")

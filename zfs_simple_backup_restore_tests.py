@@ -12,7 +12,9 @@ from zfs_simple_backup_restore import (
     CONFIG,
     Args,
     Main,
-    BackupRestoreManager,
+    BaseManager,
+    BackupManager,
+    RestoreManager,
 )
 
 
@@ -70,8 +72,10 @@ class ScriptTests:
         t("Main parse_args missing required", self.test_main_parse_args_missing)
         t("Main parse_args test mode", self.test_main_parse_args_test_mode)
         t("Main validate checks", self.test_main_validate_mocked)
-        t("BackupRestoreManager init", self.test_backup_restore_manager_init)
-        t("BackupRestoreManager backup mode logic", self.test_backup_mode_decision)
+        t("BaseManager init", self.test_base_manager_init)
+        t("BackupManager init", self.test_backup_manager_init)
+        t("BackupManager backup mode logic", self.test_backup_mode_decision)
+        t("RestoreManager init", self.test_restore_manager_init)
         t("ValidationError and FatalError", self.test_exceptions)
 
         print(f"\n=== TEST RESULTS: {passed} passed, {failed} failed ===")
@@ -537,7 +541,7 @@ class ScriptTests:
             ZFS.is_dataset_exists = orig_zfs_is_dataset
             Cmd.has_required_binaries = orig_has_required
 
-    def test_backup_restore_manager_init(self):
+    def test_base_manager_init(self):
         args = Args(
             action="backup", 
             dataset="rpool/test", 
@@ -545,7 +549,40 @@ class ScriptTests:
             prefix="TEST"
         )
         logger = Logger()
-        manager = BackupRestoreManager(args, logger)
+        manager = BaseManager(args, logger)
+        
+        assert manager.args == args
+        assert manager.logger == logger
+        assert manager.dry_run == args.dry_run
+        assert manager.prefix == "TEST"
+        assert "rpool_test" in str(manager.target_dir)
+
+    def test_backup_manager_init(self):
+        args = Args(
+            action="backup", 
+            dataset="rpool/test", 
+            mount_point=tempfile.gettempdir(),
+            prefix="TEST"
+        )
+        logger = Logger()
+        manager = BackupManager(args, logger)
+        
+        assert manager.args == args
+        assert manager.logger == logger
+        assert manager.dry_run == args.dry_run
+        assert manager.prefix == "TEST"
+        assert "rpool_test" in str(manager.target_dir)
+
+    def test_restore_manager_init(self):
+        args = Args(
+            action="restore", 
+            dataset="rpool/test", 
+            mount_point=tempfile.gettempdir(),
+            restore_pool="newpool",
+            prefix="TEST"
+        )
+        logger = Logger()
+        manager = RestoreManager(args, logger)
         
         assert manager.args == args
         assert manager.logger == logger
@@ -565,7 +602,7 @@ class ScriptTests:
                 dry_run=True  # Important: dry run to avoid actual operations
             )
             logger = Logger()
-            manager = BackupRestoreManager(args, logger)
+            manager = BackupManager(args, logger)
             
             # Ensure target directory exists
             manager.target_dir.mkdir(parents=True, exist_ok=True)
