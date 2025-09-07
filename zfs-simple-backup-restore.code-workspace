@@ -1,0 +1,20 @@
+{
+  "extensions": {
+    "recommendations": ["ms-python.black-formatter", "ms-python.python"]
+  },
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.formatOnSave": true,
+    "editor.formatOnPaste": true,
+    "black-formatter.args": ["--line-length", "160"],
+    "python.defaultInterpreterPath": "python3",
+    "[python]": {
+      "editor.defaultFormatter": "ms-python.black-formatter"
+    }
+  }
+}
