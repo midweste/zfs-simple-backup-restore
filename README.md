@@ -57,26 +57,26 @@ Note: The repository includes tests that mock `subprocess.run` for many ZFS beha
 ```
 
 NOTES:
- • Each backup "chain" (full + differentials) is stored in its own folder: chain-YYYYMMDD
- • Only the newest retention chains are kept.
- • Differential backups are always relative to the last full backup in the chain.
- • On restore, the default is to use the latest chain folder unless --restore-chain is specified.
- • You can use -s/--restore-snapshot to restore up to a specific point in a chain (filename or timestamp).
- • Use -f/--force during restore to skip the interactive confirmation prompt (useful for automation/tests).
- • Requires root for zfs commands and permissions to write/read mount points.
- • Rate limiting requires pv(1) to be installed on the system.
- • All backups are gzip compressed (.gz), using pigz if available.
- • This tool is optimized for its own backup chain structure - while it can restore gzipped ZFS streams, it's not recommended for general-purpose use with external backups.
- • Always test restores periodically!
+- Each backup "chain" (full + differentials) is stored in its own folder: chain-YYYYMMDD
+- Only the newest retention chains are kept.
+- Differential backups are always relative to the last full backup in the chain.
+- On restore, the default is to use the latest chain folder unless --restore-chain is specified.
+- You can use -s/--restore-snapshot to restore up to a specific point in a chain (filename or timestamp).
+- Use -f/--force during restore to skip the interactive confirmation prompt (useful for automation/tests).
+- Requires root for zfs commands and permissions to write/read mount points.
+- Rate limiting requires pv(1) to be installed on the system.
+- All backups are gzip compressed (.gz), using pigz if available.
+- This tool is optimized for its own backup chain structure - while it can restore gzipped ZFS streams, it's not recommended for general-purpose use with external backups.
+- Always test restores periodically!
 
 CRON JOB EXAMPLES:
---------------------------------------------------
+
+```bash
 # Run a daily backup at 1am, full every 7 days, keep 2 chains.
 0 1 * * * root /usr/local/bin/zfs-simple-backup-restore.py --action backup --dataset rpool --mount /mnt/backups/zfs --interval 7 --retention 2
 
 # Run cleanup daily at 1:30am to prune old chains and orphaned snapshots.
 30 1 * * * root /usr/local/bin/zfs-simple-backup-restore.py --action cleanup --dataset rpool --mount /mnt/backups/zfs --retention 2
---------------------------------------------------
 ```
 
 ## Testing (Vagrant)
