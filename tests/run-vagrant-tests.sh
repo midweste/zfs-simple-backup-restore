@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run non-destructive tests in Vagrant VM
+# Run tests in Vagrant VM (non-destructive first, then destructive)
 # Usage: tests/run-vagrant-tests.sh [--provision] [--destroy]
 #  --provision  Force reprovision of the VM
 #  --destroy    Destroy the VM after tests complete
@@ -23,8 +23,14 @@ else
   vagrant up
 fi
 
-# Execute the non-destructive tests
+set -o pipefail
+
+echo "=== Running non-destructive tests ==="
 vagrant ssh -c "python3 /vagrant/tests/suites/test_non_destructive.py"
+
+echo "=== Running destructive tests ==="
+# Ensure ZFS module is available in the guest and run destructive tests with sudo
+vagrant ssh -c "sudo modprobe zfs || true; cd /vagrant && sudo python3 tests/suites/test_destructive.py"
 
 if $DESTROY_AFTER; then
   vagrant destroy -f

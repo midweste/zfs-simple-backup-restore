@@ -248,7 +248,21 @@ class ChainManager:
         return self.latest_chain_dir()
 
     def files(self, chain_dir: Path) -> list:
-        return sorted([f for f in chain_dir.glob("*.zfs.gz") if not str(f).endswith(".tmp") and f.stat().st_size > 0])
+        def parse_key(p: Path):
+            name = p.name
+            # Determine type and timestamp: prefer full before diff
+            kind = 1
+            ts = ""
+            if "-full-" in name:
+                kind = 0
+                ts = name.split("-full-")[-1].split(".zfs")[0].replace(".gz", "")
+            elif "-diff-" in name:
+                kind = 1
+                ts = name.split("-diff-")[-1].split(".zfs")[0].replace(".gz", "")
+            return (kind, ts, name)
+
+        files = [f for f in chain_dir.glob("*.zfs.gz") if not str(f).endswith(".tmp") and f.stat().st_size > 0]
+        return sorted(files, key=parse_key)
 
     def is_within_backup_dir(self, path: Path) -> bool:
         abspath = path.resolve()
@@ -722,10 +736,24 @@ If this is not what you want, press Ctrl-C now.
             self.logger.always(f"Restore {f}")
             if not self.dry_run:
                 gunzip = subprocess.Popen(Cmd.gunzip(str(f)), stdout=subprocess.PIPE)
-                zfs_recv = subprocess.Popen(Cmd.zfs("receive", "-F", dest), stdin=gunzip.stdout)
-                gunzip.stdout.close()
-                zfs_recv.communicate()
-                gunzip.communicate()
+                zfs_recv = subprocess.Popen(
+                    Cmd.zfs("receive", "-F", dest),
+                    stdin=gunzip.stdout,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                # Close parent's reference to gunzip stdout so zfs_recv sees EOF properly
+                if gunzip.stdout is not None:
+                    gunzip.stdout.close()
+
+                recv_stdout, recv_stderr = zfs_recv.communicate()
+                gunzip_rc = gunzip.wait()
+
+                if zfs_recv.returncode != 0:
+                    self.logger.error(recv_stderr.decode() if isinstance(recv_stderr, (bytes, bytearray)) else str(recv_stderr))
+                    raise FatalError(f"zfs receive failed for {f.name}")
+                if gunzip_rc != 0:
+                    raise FatalError(f"gunzip failed for {f.name} (rc={gunzip_rc})")
             else:
                 self.logger.always(f"Dry-run: Would restore {f} to {dest}")
         self.logger.always("Restore done")

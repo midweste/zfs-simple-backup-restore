@@ -79,18 +79,16 @@ CRON JOB EXAMPLES:
 --------------------------------------------------
 ```
 
-## Testing
+## Testing (Vagrant)
 
-### Non-destructive tests (Vagrant)
-
-These unit tests mock ZFS commands and are safe to run without ZFS installed. We provide a Vagrant workflow that provisions Python and runs the tests for you.
+We provide a single Vagrant workflow that runs both suites: non-destructive first, then destructive.
 
 Prerequisites:
 
 - Vagrant
 - VirtualBox (or adjust the provider in `tests/Vagrantfile`)
 
-Run the tests:
+Run all tests:
 
 ```bash
 # From the repository root
@@ -106,14 +104,16 @@ tests/run-vagrant-tests.sh --destroy
 What it does:
 
 - Boots an Ubuntu 22.04 VM
-- Installs Python 3
+- Installs Python 3 and ZFS tools (zfsutils-linux, zfs-dkms, linux-headers, pv, pigz)
 - Runs `tests/suites/test_non_destructive.py`
+- Runs `tests/suites/test_destructive.py`
 
-### Destructive integration tests (optional)
+Notes:
 
-These tests operate on real ZFS pools/datasets and must be run in an isolated environment with ZFS installed. See `tests/suites/test_destructive.py`. A dedicated Vagrant flow for destructive tests can be added to install ZFS inside the VM before running the suite.
-
-> WARNING: Do not run destructive tests on a machine with data you care about.
+- Destructive tests create and destroy ZFS pools/datasets using file-based vdevs. This happens inside the VM.
+- Restore uses `-f/--force` for non-interactive confirmations inside the tests.
+- DKMS may rebuild the ZFS module on first provision; this can take a few minutes.
+- Do not run destructive tests on bare metal; use the VM workflow above.
 
 ## Adding tests
 
