@@ -1,0 +1,25 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  # Use a lightweight Ubuntu base box
+  config.vm.box = "ubuntu/jammy64"
+
+  # Sync the project root into the VM at /vagrant (default)
+  # The Vagrantfile lives in tests/, but Vagrant will set the synced folder
+  # to the parent directory that contains this Vagrantfile.
+  config.vm.synced_folder "..", "/vagrant", type: "virtualbox"
+
+  # Basic provisioning: ensure Python 3 is available
+  config.vm.provision "shell", inline: <<-SHELL
+    set -euo pipefail
+    sudo apt-get update -y
+    sudo apt-get install -y python3 python3-venv python3-pip
+  SHELL
+
+  # A bit more RAM/CPU helps run faster; adjust as needed
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = 1024
+    vb.cpus = 2
+  end
+end

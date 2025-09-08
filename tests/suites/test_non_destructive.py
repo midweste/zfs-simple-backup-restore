@@ -1,24 +1,64 @@
+#!/usr/bin/env python3
+"""
+Non-destructive unit tests for ZFS backup/restore tool.
+These tests mock external commands and don't require actual ZFS pools.
+"""
+
 import tempfile
-from pathlib import Path
+import subprocess
 import shutil
+import sys
+from pathlib import Path
+
+# Add the project root to Python path so we can import the main module
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# Try to import shared ScriptTests; fall back to the local implementation below if missing
+try:
+    from zfs_simple_backup_restore_tests import ScriptTests  # optional shared tests
+except Exception:
+    ScriptTests = None
+
+# Import project symbols used by the tests
 from zfs_simple_backup_restore import (
+    Logger,
     Cmd,
     ChainManager,
     LockFile,
-    Logger,
     ZFS,
-    FatalError,
-    ValidationError,
     CONFIG,
     Args,
     Main,
     BaseManager,
     BackupManager,
     RestoreManager,
+    ValidationError,
+    FatalError,
 )
 
+def main():
+    """Run non-destructive unit tests"""
+    print("=== ZFS Backup/Restore Non-Destructive Unit Tests ===")
 
-class ScriptTests:
+    # Change to the project directory
+    project_dir = Path(__file__).parent.parent.parent
+    sys.path.insert(0, str(project_dir))
+
+    # Create logger and run tests
+    logger = Logger(verbose=True)
+    TesterClass = ScriptTests if ScriptTests is not None else LocalScriptTests
+    tester = TesterClass(logger)
+    success = tester.run_all()
+
+    if success:
+        print("\n=== All non-destructive tests completed successfully ===")
+        sys.exit(0)
+    else:
+        print("\n=== Some non-destructive tests failed ===")
+        sys.exit(1)
+
+
+class LocalScriptTests:
     def __init__(self, logger: Logger):
         self.logger = logger
 
@@ -37,46 +77,50 @@ class ScriptTests:
                 failed += 1
 
         # Register all tests to run
-        # The following tests are registered to run
-        t("Cmd required_binaries", self.test_required_binaries)
-        t("Cmd has_required_binaries missing", self.test_cmd_has_required_binaries_missing)
-        t("Cmd zfs binary detection", self.test_cmd_zfs_binary_detection)
-        t("Cmd gzip binary detection", self.test_cmd_gzip_binary_detection)
-        t("Cmd gzip prefers pigz or falls back", self.test_cmd_gzip_prefers)
-        t("Cmd zfs/zpool command build", self.test_cmd_zfs_zpool)
-        t("Cmd gunzip has -dc", self.test_cmd_gunzip)
-        t("Cmd pv command build", self.test_cmd_pv)
-        t("ChainManager today() format", self.test_chainmanager_today)
-        t("ChainManager is_within_backup_dir", self.test_chainmanager_is_within_backup_dir)
-        t("ChainManager files only nonempty", self.test_chainmanager_files_only_nonempty)
-        t("ChainManager files returns sorted", self.test_chainmanager_files_sorted)
-        t("ChainManager prune_old keeps N", self.test_chainmanager_prune_old)
-        t("ChainManager chain_dir raises on missing", self.test_chainmanager_chain_dir_raises)
-        t("ChainManager chain_dir returns latest", self.test_chainmanager_chain_dir_latest)
-        t("LockFile locks/unlocks", self.test_lockfile_context)
-        t("Logger logs (info/always/error)", self.test_logger_output)
-        t("ZFS.is_dataset_exists true", self.test_zfs_is_dataset_exists_true)
-        t("ZFS.is_dataset_exists false", self.test_zfs_is_dataset_exists_false)
-        t("ZFS.run dry_run skips call", self.test_zfs_run_dry_run)
-        t("ZFS.run real calls subprocess", self.test_zfs_run_real)
-        t("ZFS.is_pool_exists true", self.test_zfs_is_pool_exists_true)
-        t("ZFS.is_pool_exists false", self.test_zfs_is_pool_exists_false)
-        t("ZFS.is_snapshot_exists true", self.test_zfs_is_snapshot_exists_true)
-        t("ZFS.is_snapshot_exists false", self.test_zfs_is_snapshot_exists_false)
-        t("ChainManager latest_chain_dir works", self.test_chainmanager_latest_chain_dir)
-        t("ChainManager prune cleans temp files", self.test_chainmanager_prune_temp_files)
-        t("Logger file logging works", self.test_logger_file_logging)
-        t("CONFIG values sanity", self.test_config_values)
-        t("Args dataclass creation", self.test_args_dataclass)
-        t("Main parse_args basic", self.test_main_parse_args_basic)
-        t("Main parse_args missing required", self.test_main_parse_args_missing)
-        t("Main parse_args test mode", self.test_main_parse_args_test_mode)
-        t("Main validate checks", self.test_main_validate_mocked)
-        t("BaseManager init", self.test_base_manager_init)
-        t("BackupManager init", self.test_backup_manager_init)
-        t("BackupManager backup mode logic", self.test_backup_mode_decision)
-        t("RestoreManager init", self.test_restore_manager_init)
-        t("ValidationError and FatalError", self.test_exceptions)
+        tests = [
+            ("Cmd required_binaries", self.test_required_binaries),
+            ("Cmd has_required_binaries missing", self.test_cmd_has_required_binaries_missing),
+            ("Cmd zfs binary detection", self.test_cmd_zfs_binary_detection),
+            ("Cmd gzip binary detection", self.test_cmd_gzip_binary_detection),
+            ("Cmd gzip prefers pigz or falls back", self.test_cmd_gzip_prefers),
+            ("Cmd zfs/zpool command build", self.test_cmd_zfs_zpool),
+            ("Cmd gunzip has -dc", self.test_cmd_gunzip),
+            ("Cmd pv command build", self.test_cmd_pv),
+            ("ChainManager today() format", self.test_chainmanager_today),
+            ("ChainManager is_within_backup_dir", self.test_chainmanager_is_within_backup_dir),
+            ("ChainManager files only nonempty", self.test_chainmanager_files_only_nonempty),
+            ("ChainManager files returns sorted", self.test_chainmanager_files_sorted),
+            ("ChainManager prune_old keeps N", self.test_chainmanager_prune_old),
+            ("ChainManager chain_dir raises on missing", self.test_chainmanager_chain_dir_raises),
+            ("ChainManager chain_dir returns latest", self.test_chainmanager_chain_dir_latest),
+            ("LockFile locks/unlocks", self.test_lockfile_context),
+            ("Logger logs (info/always/error)", self.test_logger_output),
+            ("ZFS.is_dataset_exists true", self.test_zfs_is_dataset_exists_true),
+            ("ZFS.is_dataset_exists false", self.test_zfs_is_dataset_exists_false),
+            ("ZFS.run dry_run skips call", self.test_zfs_run_dry_run),
+            ("ZFS.run real calls subprocess", self.test_zfs_run_real),
+            ("ZFS.is_pool_exists true", self.test_zfs_is_pool_exists_true),
+            ("ZFS.is_pool_exists false", self.test_zfs_is_pool_exists_false),
+            ("ZFS.is_snapshot_exists true", self.test_zfs_is_snapshot_exists_true),
+            ("ZFS.is_snapshot_exists false", self.test_zfs_is_snapshot_exists_false),
+            ("ChainManager latest_chain_dir works", self.test_chainmanager_latest_chain_dir),
+            ("ChainManager prune cleans temp files", self.test_chainmanager_prune_temp_files),
+            ("Logger file logging works", self.test_logger_file_logging),
+            ("CONFIG values sanity", self.test_config_values),
+            ("Args dataclass creation", self.test_args_dataclass),
+            ("Main parse_args basic", self.test_main_parse_args_basic),
+            ("Main parse_args missing required", self.test_main_parse_args_missing),
+            # ("Main parse_args test mode", self.test_main_parse_args_test_mode),  # removed: --test flag no longer supported
+            ("Main validate checks", self.test_main_validate_mocked),
+            ("BaseManager init", self.test_base_manager_init),
+            ("BackupManager init", self.test_backup_manager_init),
+            ("BackupManager backup mode logic", self.test_backup_mode_decision),
+            ("RestoreManager init", self.test_restore_manager_init),
+            ("ValidationError and FatalError", self.test_exceptions),
+        ]
+
+        for name, fn in tests:
+            t(name, fn)
 
         print(f"\n=== TEST RESULTS: {passed} passed, {failed} failed ===")
         return failed == 0
@@ -497,20 +541,6 @@ class ScriptTests:
         finally:
             sys.argv = orig_argv
 
-    def test_main_parse_args_test_mode(self):
-        import sys
-
-        orig_argv = sys.argv
-        try:
-            # Test mode should not require other args
-            sys.argv = ["script", "--test"]
-            main = Main()
-            main.parse_args()
-            assert main.args.test == True
-            assert main.args.action == "dummy"  # Should be filled with dummy values
-        finally:
-            sys.argv = orig_argv
-
     def test_main_validate_mocked(self):
         import os
 
@@ -626,3 +656,6 @@ class ScriptTests:
 
         # ValidationError should be a subclass of FatalError
         assert issubclass(ValidationError, FatalError)
+
+if __name__ == "__main__":
+    main()
