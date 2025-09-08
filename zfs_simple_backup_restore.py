@@ -164,6 +164,7 @@ class Args:
     restore_chain: str = None
     restore_snapshot: str = None
     lockfile: str = None
+    force: bool = False
     dry_run: bool = False
     verbose: bool = False
 
@@ -698,16 +699,17 @@ class RestoreManager(BaseManager):
         if self.dry_run:
             print("!!! This is a dry-run. No changes will be made.\n")
         else:
-            print(
-                f"""WARNING: This will OVERWRITE the dataset {dest} with the above snapshots.
+            if not self.args.force:
+                print(
+                    f"""WARNING: This will OVERWRITE the dataset {dest} with the above snapshots.
 If this is not what you want, press Ctrl-C now.
 """
-            )
-            answer = input("Type 'yes' to proceed: ")
-            if answer.strip() != "yes":
-                print("Aborted by user.")
-                sys.exit(CONFIG.EXIT_SUCCESS)
-            print()
+                )
+                answer = input("Type 'yes' to proceed: ")
+                if answer.strip() != "yes":
+                    print("Aborted by user.")
+                    sys.exit(CONFIG.EXIT_SUCCESS)
+                print()
         self.logger.always(f"Restoring from {chain_dir} to {dest}")
         # Ensure dataset exists
         if not self.dry_run:
@@ -757,13 +759,16 @@ EXAMPLES:
   # 4. Restore the most recent backup chain into a pool named "restored"
   sudo {CONFIG.SCRIPT_ID}.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored
 
-  # 5. Cleanup expired chain folders and orphaned snapshots only (no backup/restore)
+  # 5. Non-interactive restore (skip confirmation prompt)
+  sudo {CONFIG.SCRIPT_ID}.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored --force
+
+  # 6. Cleanup expired chain folders and orphaned snapshots only (no backup/restore)
   sudo {CONFIG.SCRIPT_ID}.py --action cleanup --dataset rpool --mount /mnt/backups/zfs --retention 2
 
-  # 6. Dry-run backup (shows what would happen, does not run)
+  # 7. Dry-run backup (shows what would happen, does not run)
   sudo {CONFIG.SCRIPT_ID}.py --action backup --dataset rpool --mount /mnt/backups/zfs --dry-run
 
-  # 7. Dry-run restore (shows what would happen, does not run)
+  # 8. Dry-run restore (shows what would happen, does not run)
   sudo {CONFIG.SCRIPT_ID}.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored --dry-run
 
 
@@ -772,7 +777,8 @@ NOTES:
  • Only the newest retention chains are kept.
  • Differential backups are always relative to the last full backup in the chain.
  • On restore, the default is to use the latest chain folder unless --restore-chain is specified.
- • You can use -s/--restore-snapshot to restore up to a specific point in a chain (filename or timestamp).
+ • You can use -s/--restore-snapshot to restore up to a specific point in a chain (timestamp or filename).
+ • Use -f/--force during restore to skip the interactive confirmation prompt (useful for automation/tests).
  • Requires root for zfs commands and permissions to write/read mount points.
  • Rate limiting requires pv(1) to be installed on the system.
  • All backups are gzip compressed (.gz), using pigz if available.
@@ -857,6 +863,7 @@ CRON JOB EXAMPLES:
             action="store_true",
             help="Show actions but do not run them",
         )
+        parser.add_argument("-f", "--force", action="store_true", help="Do not prompt for confirmation during restore")
         parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
         ns = parser.parse_args()
         # Require action/dataset/mount_point to be provided

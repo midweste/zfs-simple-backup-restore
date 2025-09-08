@@ -7,7 +7,7 @@ Simple, atomic ZFS backup & restore tooling for file level zfs backups with chai
 This repository contains:
 
 - `zfs_simple_backup_restore.py` — main script and library code.
-- `tests/` — test directory containing unit tests, Docker environment, and test runners.
+- `tests/` — test directory containing unit tests, a Vagrant environment, and test runners.
 
 ## Quick overview
 
@@ -42,17 +42,19 @@ Note: The repository includes tests that mock `subprocess.run` for many ZFS beha
   # 4. Restore the most recent backup chain into a pool named "restored"
   sudo zfs-simple-backup-restore.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored
 
-  # 5. Cleanup expired chain folders and orphaned snapshots only (no backup/restore)
+  # 5. Non-interactive restore (skip confirmation prompt)
+  sudo zfs-simple-backup-restore.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored --force
+
+  # 6. Cleanup expired chain folders and orphaned snapshots only (no backup/restore)
   sudo zfs-simple-backup-restore.py --action cleanup --dataset rpool --mount /mnt/backups/zfs --retention 2
 
-  # 6. Dry-run backup (shows what would happen, does not run)
+  # 7. Dry-run backup (shows what would happen, does not run)
   sudo zfs-simple-backup-restore.py --action backup --dataset rpool --mount /mnt/backups/zfs --dry-run
 
-  # 7. Dry-run restore (shows what would happen, does not run)
+  # 8. Dry-run restore (shows what would happen, does not run)
   sudo zfs-simple-backup-restore.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored --dry-run
 
-  # 8. Internal test mode (non-destructive)
-  sudo zfs-simple-backup-restore.py --test
+```
 
 NOTES:
  • Each backup "chain" (full + differentials) is stored in its own folder: chain-YYYYMMDD
@@ -60,6 +62,7 @@ NOTES:
  • Differential backups are always relative to the last full backup in the chain.
  • On restore, the default is to use the latest chain folder unless --restore-chain is specified.
  • You can use -s/--restore-snapshot to restore up to a specific point in a chain (filename or timestamp).
+ • Use -f/--force during restore to skip the interactive confirmation prompt (useful for automation/tests).
  • Requires root for zfs commands and permissions to write/read mount points.
  • Rate limiting requires pv(1) to be installed on the system.
  • All backups are gzip compressed (.gz), using pigz if available.
@@ -78,77 +81,39 @@ CRON JOB EXAMPLES:
 
 ## Testing
 
-### Non-destructive unit tests
+### Non-destructive tests (Vagrant)
 
-Run the built-in unit tests (safe, mocked ZFS operations):
+These unit tests mock ZFS commands and are safe to run without ZFS installed. We provide a Vagrant workflow that provisions Python and runs the tests for you.
 
-```bash
-python3 zfs_simple_backup_restore.py --test
-```
+Prerequisites:
 
-## Testing
+- Vagrant
+- VirtualBox (or adjust the provider in `tests/Vagrantfile`)
 
-All tests must be run inside the Docker container to ensure proper isolation and safety. The test environment includes everything needed to run both unit and integration tests.
-
-### Prerequisites
-
-- Docker installed on your system
-- ZFS kernel modules loaded on the host (for destructive tests)
-
-### Running Tests
-
-#### 1. Non-Destructive Unit Tests
-
-These tests are safe to run anywhere and don't require special privileges:
+Run the tests:
 
 ```bash
-cd tests
-./test-runner.sh safe
+# From the repository root
+tests/run-vagrant-tests.sh --provision
+
+# Subsequent runs (no reprovision):
+tests/run-vagrant-tests.sh
+
+# Destroy the VM after a run:
+tests/run-vagrant-tests.sh --destroy
 ```
 
-#### 2. Destructive Integration Tests
+What it does:
 
-**WARNING**: These tests create and destroy ZFS pools and datasets. They must be run in a controlled environment.
+- Boots an Ubuntu 22.04 VM
+- Installs Python 3
+- Runs `tests/suites/test_non_destructive.py`
 
-```bash
-cd tests
-./test-runner.sh destructive
-```
+### Destructive integration tests (optional)
 
-#### 3. Interactive Development Shell
+These tests operate on real ZFS pools/datasets and must be run in an isolated environment with ZFS installed. See `tests/suites/test_destructive.py`. A dedicated Vagrant flow for destructive tests can be added to install ZFS inside the VM before running the suite.
 
-For debugging or manual testing, start an interactive shell in the test environment:
-
-```bash
-cd tests
-./test-runner.sh shell
-```
-
-### Test Environment Details
-
-The test environment includes:
-- Ubuntu 22.04 base
-- Python 3 with all required dependencies
-- ZFS utilities and kernel modules
-- All required binaries (zfs, zpool, gzip, pigz, pv, etc.)
-
-### Running Specific Tests
-
-To run specific test cases or methods, use the interactive shell:
-
-```bash
-# Run a specific test class
-python3 -m unittest test_non_destructive.ScriptTests.test_specific_case
-
-# Run with more verbose output
-python3 -m unittest test_non_destructive.ScriptTests -v
-```
-
-The Docker environment provides:
-- Ubuntu 22.04 with ZFS utilities
-- Isolated test pools using file-based vdevs
-- Complete backup/restore cycle testing
-- Automatic cleanup after tests
+> WARNING: Do not run destructive tests on a machine with data you care about.
 
 ## Adding tests
 
