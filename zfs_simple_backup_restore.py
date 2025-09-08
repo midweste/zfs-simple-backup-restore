@@ -33,18 +33,18 @@ class CONFIG:
     DEFAULT_INTERVAL_DAYS = 7
     DEFAULT_RETENTION_CHAINS = 2
     DEFAULT_PREFIX = SCRIPT_ID
-    
+
     # Configurable system paths with fallbacks
     @staticmethod
     def get_log_dir():
         import os
         return os.environ.get('ZFS_BACKUP_LOG_DIR', '/var/log')
-    
+
     @staticmethod
     def get_lock_dir():
         import os
         return os.environ.get('ZFS_BACKUP_LOCK_DIR', '/var/lock')
-    
+
     @staticmethod
     def get_default_lockfile():
         return f"{CONFIG.get_lock_dir()}/{CONFIG.SCRIPT_ID}.lock"
@@ -305,67 +305,64 @@ class ZFS:
 
     @staticmethod
     def verify_backup_file(file_path: Path, logger: Logger) -> bool:
-        """Verify a gzipped ZFS backup file using zstreamdump to check only the header."""
+        """Verify a gzipped ZFS backup file using basic checks."""
+        logger.info(f"Verifying backup file: {file_path}")
+
+        # First check if file exists and has content
+        if not file_path.exists():
+            logger.error(f"Backup file does not exist: {file_path}")
+            return False
+
         try:
-            # Verify file is gzipped (all backups from this tool are compressed)
-            with open(file_path, 'rb') as f:
-                magic = f.read(2)
-            
-            if magic != b'\x1f\x8b':  # gzip magic number
-                logger.error(f"Backup file {file_path.name} is not gzipped - invalid backup format")
-                return False
-            
-            # Use shell command to efficiently check only the header without decompressing entire file
-            cmd = f"zstreamdump -v <(gunzip -c {shutil.quote(str(file_path))} | head -c 1024) 2>/dev/null | head -1"
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=10  # Timeout to prevent hanging
+            # Attempt a quick header verification using zstreamdump over the first 1KB
+            # We avoid bash-specific process substitution for portability in minimal environments.
+            gunzip_proc = subprocess.Popen(
+                ["gunzip", "-c", str(file_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-            
-            if result.returncode == 0 and result.stdout.strip():
+            head_proc = subprocess.Popen(
+                ["head", "-c", "1024"],
+                stdin=gunzip_proc.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            # Detach stdout pipes to allow proper SIGPIPE handling
+            if gunzip_proc.stdout is not None:
+                gunzip_proc.stdout.close()
+
+            zstreamdump_proc = subprocess.Popen(
+                ["zstreamdump", "-v"],
+                stdin=head_proc.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if head_proc.stdout is not None:
+                head_proc.stdout.close()
+
+            stdout, stderr = zstreamdump_proc.communicate(timeout=10)
+            # Ensure upstream processes complete
+            try:
+                head_proc.communicate(timeout=5)
+            except Exception:
+                pass
+            try:
+                gunzip_proc.communicate(timeout=5)
+            except Exception:
+                pass
+
+            if zstreamdump_proc.returncode == 0:
                 logger.info(f"Backup file {file_path.name} verified: valid ZFS stream header")
                 return True
             else:
-                # Fallback: try reading a small chunk and pipe to zstreamdump
-                gunzip_proc = subprocess.Popen(
-                    ["gunzip", "-c", str(file_path)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                head_proc = subprocess.Popen(
-                    ["head", "-c", "1024"],
-                    stdin=gunzip_proc.stdout,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                gunzip_proc.stdout.close()
-                
-                zstreamdump_proc = subprocess.Popen(
-                    ["zstreamdump", "-v"],
-                    stdin=head_proc.stdout,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                head_proc.stdout.close()
-                
-                stdout, stderr = zstreamdump_proc.communicate()
-                head_proc.communicate()
-                gunzip_proc.communicate()
-                
-                if zstreamdump_proc.returncode == 0:
-                    logger.info(f"Backup file {file_path.name} verified: valid ZFS stream header")
-                    return True
-                else:
-                    logger.error(f"Backup file {file_path.name} verification failed: invalid ZFS stream")
-                    return False
-                    
+                logger.error(f"Backup file {file_path.name} verification failed: invalid ZFS stream")
+                return False
+
         except subprocess.TimeoutExpired:
             logger.error(f"Backup file {file_path.name} verification timed out")
             return False
         except FileNotFoundError:
+            # If zstreamdump is missing, we can't verify here in minimal environments; consider it unverifiable
             logger.error("zstreamdump command not found - ZFS utilities may not be installed")
             return False
         except Exception as e:
@@ -379,11 +376,11 @@ class BaseManager:
         self.args = args
         self.logger = logger
         self.dry_run = args.dry_run
-        
+
         # Validate and sanitize paths
         self._validate_dataset_name(args.dataset)
         self._validate_mount_point(args.mount_point)
-        
+
         self.target_dir = Path(args.mount_point) / self._sanitize_dataset_name(args.dataset)
         self.last_chain_file = self.target_dir / "last_chain"
         self.prefix = args.prefix or CONFIG.DEFAULT_PREFIX
@@ -393,15 +390,15 @@ class BaseManager:
         """Validate ZFS dataset name for security and correctness."""
         if not dataset:
             raise ValidationError("Dataset name cannot be empty")
-        
+
         # Check for path traversal attempts
         if ".." in dataset or dataset.startswith("/"):
             raise ValidationError("Dataset name contains invalid path components")
-        
+
         # Basic ZFS dataset name validation
         if not all(c.isalnum() or c in "/_-" for c in dataset):
             raise ValidationError("Dataset name contains invalid characters")
-        
+
         # Check length (ZFS has limits)
         if len(dataset) > 256:
             raise ValidationError("Dataset name too long")
@@ -410,13 +407,13 @@ class BaseManager:
         """Validate mount point path for security."""
         if not mount_point:
             raise ValidationError("Mount point cannot be empty")
-        
+
         mount_path = Path(mount_point).resolve()
-        
+
         # Check for path traversal attempts
         if ".." in str(mount_path):
             raise ValidationError("Mount point contains path traversal")
-        
+
         # Ensure it's an absolute path
         if not mount_path.is_absolute():
             raise ValidationError("Mount point must be an absolute path")
@@ -465,7 +462,7 @@ class BackupManager(BaseManager):
         filename = chain_dir / f"{snap}.zfs.gz"
         tmpfile = str(filename) + ".tmp"
         self.logger.always(f"Full snapshot: {snap} into {chain_dir}")
-        
+
         snapshot_created = False
         try:
             if not self.dry_run:
@@ -476,7 +473,7 @@ class BackupManager(BaseManager):
                     dry_run=self.dry_run,
                 )
                 snapshot_created = True
-                
+
                 # Create backup with improved error handling
                 with open(tmpfile, "wb") as f:
                     p1 = subprocess.Popen(
@@ -484,18 +481,18 @@ class BackupManager(BaseManager):
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                     )
-                    
+
                     if self.args.rate:
                         p2 = subprocess.Popen(Cmd.pv(self.args.rate), stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         p3 = subprocess.Popen(Cmd.gzip(), stdin=p2.stdout, stdout=f, stderr=subprocess.PIPE)
                         p1.stdout.close()
                         p2.stdout.close()
-                        
+
                         # Wait for all processes and check return codes
                         _, p3_err = p3.communicate()
                         _, p2_err = p2.communicate()
                         _, p1_err = p1.communicate()
-                        
+
                         if p1.returncode != 0:
                             raise subprocess.CalledProcessError(p1.returncode, "zfs send", p1_err)
                         if p2.returncode != 0:
@@ -505,33 +502,33 @@ class BackupManager(BaseManager):
                     else:
                         p2 = subprocess.Popen(Cmd.gzip(), stdin=p1.stdout, stdout=f, stderr=subprocess.PIPE)
                         p1.stdout.close()
-                        
+
                         # Wait for processes and check return codes
                         _, p2_err = p2.communicate()
                         _, p1_err = p1.communicate()
-                        
+
                         if p1.returncode != 0:
                             raise subprocess.CalledProcessError(p1.returncode, "zfs send", p1_err)
                         if p2.returncode != 0:
                             raise subprocess.CalledProcessError(p2.returncode, "gzip", p2_err)
-                
+
                 # Verify backup file
                 if Path(tmpfile).stat().st_size == 0:
                     raise FatalError("Backup file is empty (pipeline failure)")
-                
+
                 if not ZFS.verify_backup_file(Path(tmpfile), self.logger):
                     raise FatalError("Backup file verification failed")
-                
+
                 # Success - rename temp file to final name
                 Path(tmpfile).rename(filename)
                 self.logger.always(f"Full backup completed: {filename.name}")
-                
+
         except Exception as e:
             # Cleanup on failure
             if Path(tmpfile).exists():
                 Path(tmpfile).unlink()
                 self.logger.always(f"Removed failed backup file: {tmpfile}")
-            
+
             if snapshot_created and not self.dry_run:
                 try:
                     ZFS.run(
@@ -542,9 +539,9 @@ class BackupManager(BaseManager):
                     self.logger.always(f"Cleaned up failed snapshot: {snap}")
                 except Exception as cleanup_err:
                     self.logger.error(f"Failed to cleanup snapshot {snap}: {cleanup_err}")
-            
+
             raise FatalError(f"Full backup failed: {e}")
-        
+
         self.last_chain_file.write_text(chain_name)
 
     def backup_differential(self) -> None:
@@ -565,7 +562,7 @@ class BackupManager(BaseManager):
         filename = chain_dir / f"{snap}.zfs.gz"
         tmpfile = str(filename) + ".tmp"
         self.logger.always(f"Differential {base_snap} -> {snap} in {chain_dir}")
-        
+
         snapshot_created = False
         try:
             if not self.dry_run:
@@ -576,7 +573,7 @@ class BackupManager(BaseManager):
                     dry_run=self.dry_run,
                 )
                 snapshot_created = True
-                
+
                 # Create differential backup with improved error handling
                 with open(tmpfile, "wb") as f:
                     p1 = subprocess.Popen(
@@ -584,18 +581,18 @@ class BackupManager(BaseManager):
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                     )
-                    
+
                     if self.args.rate:
                         p2 = subprocess.Popen(Cmd.pv(self.args.rate), stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         p3 = subprocess.Popen(Cmd.gzip(), stdin=p2.stdout, stdout=f, stderr=subprocess.PIPE)
                         p1.stdout.close()
                         p2.stdout.close()
-                        
+
                         # Wait for all processes and check return codes
                         _, p3_err = p3.communicate()
                         _, p2_err = p2.communicate()
                         _, p1_err = p1.communicate()
-                        
+
                         if p1.returncode != 0:
                             raise subprocess.CalledProcessError(p1.returncode, "zfs send", p1_err)
                         if p2.returncode != 0:
@@ -605,33 +602,33 @@ class BackupManager(BaseManager):
                     else:
                         p2 = subprocess.Popen(Cmd.gzip(), stdin=p1.stdout, stdout=f, stderr=subprocess.PIPE)
                         p1.stdout.close()
-                        
+
                         # Wait for processes and check return codes
                         _, p2_err = p2.communicate()
                         _, p1_err = p1.communicate()
-                        
+
                         if p1.returncode != 0:
                             raise subprocess.CalledProcessError(p1.returncode, "zfs send", p1_err)
                         if p2.returncode != 0:
                             raise subprocess.CalledProcessError(p2.returncode, "gzip", p2_err)
-                
+
                 # Verify backup file
                 if Path(tmpfile).stat().st_size == 0:
                     raise FatalError("Differential backup file is empty (pipeline failure)")
-                
+
                 if not ZFS.verify_backup_file(Path(tmpfile), self.logger):
                     raise FatalError("Differential backup file verification failed")
-                
+
                 # Success - rename temp file to final name
                 Path(tmpfile).rename(filename)
                 self.logger.always(f"Differential backup completed: {filename.name}")
-                
+
         except Exception as e:
             # Cleanup on failure
             if Path(tmpfile).exists():
                 Path(tmpfile).unlink()
                 self.logger.always(f"Removed failed backup file: {tmpfile}")
-            
+
             if snapshot_created and not self.dry_run:
                 try:
                     ZFS.run(
@@ -642,7 +639,7 @@ class BackupManager(BaseManager):
                     self.logger.always(f"Cleaned up failed snapshot: {snap}")
                 except Exception as cleanup_err:
                     self.logger.error(f"Failed to cleanup snapshot {snap}: {cleanup_err}")
-            
+
             raise FatalError(f"Differential backup failed: {e}")
 
 
@@ -661,7 +658,7 @@ class RestoreManager(BaseManager):
         for f in files:
             if not ZFS.verify_backup_file(f, self.logger):
                 raise FatalError(f"Backup file verification failed: {f.name}")
-        
+
         # Support restoring up to a specific file/snapshot if requested
         if self.args.restore_snapshot:
             found = False
@@ -697,6 +694,7 @@ class RestoreManager(BaseManager):
         for f in files:
             print(f"     - {f.name}")
         print()
+
         if self.dry_run:
             print("!!! This is a dry-run. No changes will be made.\n")
         else:
@@ -729,8 +727,6 @@ If this is not what you want, press Ctrl-C now.
             else:
                 self.logger.always(f"Dry-run: Would restore {f} to {dest}")
         self.logger.always("Restore done")
-
-
 
 
 # ========== Main ==========
@@ -901,7 +897,7 @@ CRON JOB EXAMPLES:
                     manager.cleanup()
         except (ValidationError, FatalError) as e:
             self.logger.error(str(e))
-            sys.exit(CONFIG.EXIT_FAILURE)
+            sys.exit(CONFIG.EXIT_INVALID_ARGS)
         except Exception as e:
             self.logger.error(f"Unexpected error: {e}")
             sys.exit(CONFIG.EXIT_INVALID_ARGS)
