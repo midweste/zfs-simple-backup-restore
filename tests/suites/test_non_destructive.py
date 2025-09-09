@@ -5,6 +5,7 @@ These tests mock external commands and don't require actual ZFS pools.
 """
 
 import sys
+import os
 import tempfile
 import shutil
 from pathlib import Path
@@ -13,6 +14,11 @@ from test_base import TestBase
 
 # Add the project root to Python path so we can import the main module
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# Guard: only allow running this script when invoked via tests/run-tests.sh which sets RUN_TESTS=1
+if os.environ.get("RUN_TESTS") != "1":
+    print("ERROR: non-destructive tests must be run via tests/run-tests.sh (use that script to run tests)")
+    sys.exit(2)
 
 # Try to import shared ScriptTests; fall back to the local implementation below if missing
 try:
@@ -61,13 +67,17 @@ def main():
         from test_base import TestBase
 
         tester = TesterClass(TestBase().logger)
-    success = tester.run_all()
-    # Ensure any temporary dirs created via TestBase are cleaned up
+    # Run tests with tester's logger and run inside project dir for consistent imports/CWD
     try:
-        if hasattr(tester, "cleanup"):
-            tester.cleanup()
-    except Exception:
-        pass
+        with tester.temp_chdir(project_dir):
+            success = tester.run_all(tester.logger)
+    finally:
+        # Ensure any temporary dirs created via TestBase are cleaned up
+        try:
+            if hasattr(tester, "cleanup"):
+                tester.cleanup()
+        except Exception:
+            pass
 
     if success:
         sys.exit(0)
@@ -364,18 +374,16 @@ class LocalScriptTests(TestBase):
             assert (chain_dir / "backup2.zfs.gz").exists()
 
     def test_logger_file_logging(self):
-        import tempfile
         import os
 
-        # Create a temporary log file
-        log_fd, log_path = tempfile.mkstemp(suffix=".log")
-        os.close(log_fd)
+        # Use TestBase tempdir to ensure cleanup
+        with self.tempdir(prefix="logger-test-") as td:
+            log_path = td / "test.log"
 
-        # Create logger that writes to our temp file
-        logger = Logger(verbose=False)
-        logger.log_file_path = log_path
+            # Create logger that writes to our temp file
+            logger = Logger(verbose=False)
+            logger.log_file_path = str(log_path)
 
-        try:
             # Reopen the log file
             logger.log_file = open(log_path, "a")
 
@@ -391,13 +399,6 @@ class LocalScriptTests(TestBase):
                 assert "Test info message" in content
                 assert "Test error message" in content
                 assert "Test always message" in content
-
-        finally:
-            # Clean up
-            try:
-                os.unlink(log_path)
-            except:
-                pass
 
     def test_args_dataclass(self):
         # Test Args dataclass creation with defaults

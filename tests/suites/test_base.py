@@ -48,6 +48,16 @@ class TestBase:
 
     # Quiet subprocess runner (raises on error when check=True)
     def run_cmd(self, cmd: Sequence[str | int], check: bool = True) -> subprocess.CompletedProcess:
+        """Run a command and return CompletedProcess.
+
+        Args:
+            cmd: sequence of command parts.
+            check: if True, raise RuntimeError on non-zero exit.
+
+        Returns:
+            subprocess.CompletedProcess
+        """
+
         cmd_str = [str(x) for x in cmd]
         result = subprocess.run(cmd_str, capture_output=True, text=True)
         if check and result.returncode != 0:
@@ -90,6 +100,16 @@ class TestBase:
             yield p
         finally:
             self.rm_dir(str(p))
+
+    @contextmanager
+    def temp_chdir(self, path: str | Path):
+        """Temporarily change CWD to `path` and restore it afterwards."""
+        old = os.getcwd()
+        os.chdir(str(path))
+        try:
+            yield
+        finally:
+            os.chdir(old)
 
     # ZFS helpers
     def zfs_get(self, args: Iterable[str]) -> str:
@@ -167,13 +187,20 @@ class TestBase:
     @contextmanager
     def patched(self, obj: Any, attr: str, value: Any) -> Iterator[None]:
         """Temporarily set obj.attr to value and restore afterwards."""
-
-        original = getattr(obj, attr)
+        had_attr = hasattr(obj, attr)
+        original = getattr(obj, attr, None)
         setattr(obj, attr, value)
         try:
             yield
         finally:
-            setattr(obj, attr, original)
+            if had_attr:
+                setattr(obj, attr, original)
+            else:
+                # If the attribute didn't exist before, try to delete it; if deletion fails, restore to original
+                try:
+                    delattr(obj, attr)
+                except Exception:
+                    setattr(obj, attr, original)
 
     # Generic test runner: takes a list of (name, callable) and a logger with .always/.error
     def run_tests(self, tests: Sequence[tuple[str, Any]], logger: Any) -> bool:
@@ -183,10 +210,17 @@ class TestBase:
         for name, fn in tests:
             try:
                 fn()
-                print(f"{name} ... Pass")
+                # Prefer structured logger; fall back to stdout
+                try:
+                    logger.always(f"{name} ... Pass")
+                except Exception:
+                    print(f"{name} ... Pass")
                 passed += 1
             except Exception as e:
-                print(f"{name} ... Failed: {e}")
+                try:
+                    logger.error(f"{name} ... Failed: {e}")
+                except Exception:
+                    print(f"{name} ... Failed: {e}")
                 failed += 1
 
         print(f"\n=== TEST RESULTS: {passed} passed, {failed} failed ===")
