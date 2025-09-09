@@ -111,6 +111,79 @@ class TestBase:
         finally:
             os.chdir(old)
 
+    # ----- Convenience helpers for tests -----
+    def make_chain_manager(self, prefix: str = "chain-temp-") -> tuple[Path, object]:
+        """Create a temporary directory and return (Path, ChainManager instance).
+
+        The temporary directory is registered for cleanup via TestBase.mktemp_dir.
+        """
+        tmp = Path(self.mktemp_dir(prefix=prefix))
+        # Import here to avoid import-time requirements when TestBase is imported standalone
+        from zfs_simple_backup_restore import ChainManager  # type: ignore
+
+        return tmp, ChainManager(tmp, "TEST", self.logger)
+
+    def create_chain_dirs(self, root: Path, names: list[str]) -> None:
+        """Create chain directories under root with given names."""
+        for n in names:
+            (root / n).mkdir(parents=True, exist_ok=True)
+
+    def write_file(self, path: Path, content: bytes | str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, str):
+            path.write_text(content)
+        else:
+            path.write_bytes(content)
+
+    def assert_file_exists(self, path: Path, msg: str | None = None) -> None:
+        if not path.exists():
+            raise AssertionError(msg or f"Expected file to exist: {path}")
+
+    def assert_file_not_exists(self, path: Path, msg: str | None = None) -> None:
+        if path.exists():
+            raise AssertionError(msg or f"Expected file to be absent: {path}")
+
+    def assert_file_text_equal(self, path: Path, expected: str, msg: str | None = None) -> None:
+        actual = path.read_text()
+        if actual != expected:
+            raise AssertionError(msg or f"File {path} content mismatch: expected {expected!r}, got {actual!r}")
+
+    def set_logger_logfile(self, logger: Any, path: Path) -> None:
+        """Prepare and attach a log file to a Logger instance for tests.
+
+        This ensures parent directories exist, closes any existing logger.log_file,
+        sets logger.log_file_path, and opens the file for append assigning
+        logger.log_file to the file object.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Close any existing file handle if present
+        try:
+            lf = getattr(logger, "log_file", None)
+            if lf:
+                try:
+                    lf.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        logger.log_file_path = str(path)
+        try:
+            logger.log_file = open(path, "a")
+        except Exception:
+            logger.log_file = None
+
+    def read_log(self, path: Path) -> str:
+        """Return the contents of a log file as text."""
+        return path.read_text()
+
+    def assert_file_text_equal_stripped(self, path: Path, expected: str, msg: str | None = None) -> None:
+        """Assert that file content equals expected after stripping whitespace/newlines."""
+        actual = path.read_text().strip()
+        exp = expected.strip()
+        if actual != exp:
+            raise AssertionError(msg or f"File {path} content mismatch (stripped): expected {exp!r}, got {actual!r}")
+
     # ZFS helpers
     def zfs_get(self, args: Iterable[str]) -> str:
         return self.run_cmd(["zfs", *args]).stdout.strip()

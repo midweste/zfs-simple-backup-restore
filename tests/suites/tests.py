@@ -6,7 +6,6 @@ These tests mock external commands and don't require actual ZFS pools.
 
 import sys
 import os
-import tempfile
 import shutil
 from pathlib import Path
 
@@ -47,7 +46,7 @@ def main():
     sys.path.insert(0, str(project_dir))
 
     # Create tester using the local harness implementation
-    tester = LocalScriptTests()
+    tester = TestSuite()
 
     # Run tests with tester's logger and run inside project dir for consistent imports/CWD
     ctx = None
@@ -79,7 +78,7 @@ def main():
         sys.exit(1)
 
 
-class LocalScriptTests(TestBase):
+class TestSuite(TestBase):
     def __init__(self):
         super().__init__()
         self.ctx: dict = {}
@@ -90,6 +89,7 @@ class LocalScriptTests(TestBase):
     def test_cmd_has_required_binaries_missing(self):
         import shutil
 
+        # Simulate zfs and gzip missing
         # Simulate zfs and gzip missing
         with self.patched(shutil, "which", lambda name: None):
             ok = Cmd.has_required_binaries(self.logger)
@@ -105,6 +105,7 @@ class LocalScriptTests(TestBase):
         import shutil
 
         # Simulate zfs not found in PATH
+        # Simulate zfs not found in PATH
         orig_which = shutil.which
         with self.patched(shutil, "which", lambda name, _orig=orig_which: None if name == "zfs" else _orig(name)):
             zfs_cmd = Cmd.zfs("list")
@@ -119,6 +120,7 @@ class LocalScriptTests(TestBase):
         import shutil
         import subprocess
 
+        # Simulate pigz not found, gzip found
         # Simulate pigz not found, gzip found
         orig_which = shutil.which
         with self.patched(shutil, "which", lambda name, _orig=orig_which: (None if name == "pigz" else ("somepath/gzip" if name == "gzip" else _orig(name)))):
@@ -146,6 +148,7 @@ class LocalScriptTests(TestBase):
     def test_cmd_gzip_prefers(self):
         import subprocess
 
+        # Test 1: pigz found and works, should prefer pigz
         # Test 1: pigz found and works, should prefer pigz
         def fake_run_pigz_works(cmd, **kwargs):
             if cmd[0].endswith("pigz") and "--version" in cmd:
@@ -186,76 +189,70 @@ class LocalScriptTests(TestBase):
         assert pv_cmd[0].endswith("pv"), f"Expected pv command, got {pv_cmd[0]}"
         assert "-L" in pv_cmd and "10M" in pv_cmd
 
-    def test_chainmanager_today(self):
-        with self.tempdir(prefix="chain-today-") as tmp:
-            c = ChainManager(tmp, "TEST", self.logger)
-            s = c.today()
-            assert s.startswith("chain-") and len(s) == 14
+    def test_chainmanager_today_returns_expected_chain_name(self):
+        tmp, c = self.make_chain_manager(prefix="chain-today-")
+        s = c.today()
+        assert s.startswith("chain-") and len(s) == 14
 
-    def test_chainmanager_is_within_backup_dir(self):
-        with self.tempdir(prefix="chain-inout-") as tmp:
-            c = ChainManager(tmp, "TEST", self.logger)
-            d = tmp / "chain-test-in"
-            d.mkdir(exist_ok=True)
-            assert c.is_within_backup_dir(d), f"{d} should be inside {tmp}"
-            outside = tmp.parent / "definitely-not-in-backup-root"
-            assert not c.is_within_backup_dir(outside), f"{outside} should NOT be inside {tmp}"
+    def test_chainmanager_is_within_backup_dir_detects_inside_and_outside(self):
+        tmp, c = self.make_chain_manager(prefix="chain-inout-")
+        inside = tmp / "chain-test-in"
+        self.create_chain_dirs(tmp, ["chain-test-in"])
+        assert c.is_within_backup_dir(inside), f"{inside} should be inside {tmp}"
+        outside = tmp.parent / "definitely-not-in-backup-root"
+        assert not c.is_within_backup_dir(outside), f"{outside} should NOT be inside {tmp}"
 
-    def test_chainmanager_files_only_nonempty(self):
-        with self.tempdir(prefix="chain-nonempty-") as tmp:
-            d = tmp / "chain-test-nonempty"
-            d.mkdir(exist_ok=True)
-            (d / "ok.zfs.gz").write_bytes(b"data")
-            (d / "empty.zfs.gz").write_bytes(b"")
-            c = ChainManager(tmp, "TEST", self.logger)
-            files = c.files(d)
-            assert any(f.name == "ok.zfs.gz" for f in files)
-            assert all(f.stat().st_size > 0 for f in files)
+    def test_chainmanager_files_filters_out_empty_files(self):
+        tmp, c = self.make_chain_manager(prefix="chain-nonempty-")
+        d = tmp / "chain-test-nonempty"
+        self.create_chain_dirs(tmp, ["chain-test-nonempty"])
+        self.write_file(d / "ok.zfs.gz", b"data")
+        self.write_file(d / "empty.zfs.gz", b"")
+        files = c.files(d)
+        assert any(f.name == "ok.zfs.gz" for f in files)
+        assert all(f.stat().st_size > 0 for f in files)
 
-    def test_chainmanager_files_sorted(self):
-        with self.tempdir(prefix="chain-sorted-") as tmp:
-            d = tmp / "chain-test-sorted"
-            d.mkdir(exist_ok=True)
-            (d / "b.zfs.gz").write_bytes(b"data")
-            (d / "a.zfs.gz").write_bytes(b"data")
-            (d / "c.zfs.gz").write_bytes(b"data")
-            c = ChainManager(tmp, "TEST", self.logger)
-            files = c.files(d)
-            names = [f.name for f in files]
-            assert names == sorted(names)
+    def test_chainmanager_files_returned_in_sorted_order(self):
+        tmp, c = self.make_chain_manager(prefix="chain-sorted-")
+        d = tmp / "chain-test-sorted"
+        self.create_chain_dirs(tmp, ["chain-test-sorted"])
+        self.write_file(d / "b.zfs.gz", b"data")
+        self.write_file(d / "a.zfs.gz", b"data")
+        self.write_file(d / "c.zfs.gz", b"data")
+        files = c.files(d)
+        names = [f.name for f in files]
+        assert names == sorted(names)
 
-    def test_chainmanager_prune_old(self):
-        with self.tempdir(prefix="chain-prune-") as tmp:
-            c = ChainManager(tmp, "TEST", self.logger)
-            for i in range(4):
-                (tmp / f"chain-2024071{i}").mkdir(exist_ok=True)
-            c.prune_old(2, dry_run=False)
-            chains = set(p.name for p in tmp.iterdir() if p.is_dir() and p.name.startswith("chain-"))
-            assert len(chains) == 2
+    def test_chainmanager_prune_old_removes_old_chains(self):
+        tmp, c = self.make_chain_manager(prefix="chain-prune-")
+        # Create 4 chain directories
+        names = [f"chain-2024071{i}" for i in range(4)]
+        self.create_chain_dirs(tmp, names)
+
+        c.prune_old(2, dry_run=False)
+        chains = set(p.name for p in tmp.iterdir() if p.is_dir() and p.name.startswith("chain-"))
+        assert len(chains) == 2
 
     def test_chainmanager_chain_dir_raises(self):
-        with self.tempdir(prefix="chain-raises-") as tmp:
-            c = ChainManager(tmp, "TEST", self.logger)
-            try:
-                c.chain_dir("not-a-chain")
-                assert False, "Should have raised FatalError"
-            except FatalError:
-                pass
+        tmp, c = self.make_chain_manager(prefix="chain-raises-")
+        try:
+            c.chain_dir("not-a-chain")
+            assert False, "Should have raised FatalError"
+        except FatalError:
+            pass
 
     def test_chainmanager_chain_dir_latest(self):
-        with self.tempdir(prefix="chain-latest-") as tmp:
-            c = ChainManager(tmp, "TEST", self.logger)
-            (tmp / "chain-20200101").mkdir(exist_ok=True)
-            (tmp / "chain-20200102").mkdir(exist_ok=True)
-            latest = c.chain_dir()
-            assert latest.name == "chain-20200102"
+        tmp, c = self.make_chain_manager(prefix="chain-latest-")
+        self.create_chain_dirs(tmp, ["chain-20200101", "chain-20200102"])
+        latest = c.chain_dir()
+        assert latest.name == "chain-20200102"
 
     def test_lockfile_context(self):
         with self.tempdir(prefix="lockfile-") as tmp_root:
             lock_path = tmp_root / "test.lock"
             with LockFile(lock_path, self.logger):
-                assert lock_path.exists()
-            assert not lock_path.exists()
+                self.assert_file_exists(lock_path)
+            self.assert_file_not_exists(lock_path)
 
     def test_logger_output(self):
         self.logger.info("Logger info test")
@@ -277,7 +274,7 @@ class LocalScriptTests(TestBase):
         with self.patched(subprocess, "run", fail):
             assert not ZFS.is_dataset_exists("rpool/test")
 
-    def test_zfs_run_dry_run(self):
+    def test_zfs_run_does_not_execute_when_dry_run(self):
         import subprocess
 
         called = []
@@ -285,7 +282,7 @@ class LocalScriptTests(TestBase):
             ZFS.run(["zfs", "list"], self.logger, dry_run=True)
             assert not called  # Should not call subprocess.run when dry_run=True
 
-    def test_zfs_run_real(self):
+    def test_zfs_run_invokes_subprocess_run_when_not_dry(self):
         import subprocess
 
         called = {}
@@ -333,42 +330,38 @@ class LocalScriptTests(TestBase):
             assert not ZFS.is_snapshot_exists("rpool/test", "nonexistent")
 
     def test_chainmanager_latest_chain_dir(self):
-        with self.tempdir(prefix="chain-latest2-") as tmp:
-            c = ChainManager(tmp, "TEST", self.logger)
-            (tmp / "chain-20200101").mkdir(exist_ok=True)
-            (tmp / "chain-20200102").mkdir(exist_ok=True)
-            (tmp / "chain-20200103").mkdir(exist_ok=True)
-            latest = c.latest_chain_dir()
-            assert latest.name == "chain-20200103"
+        tmp, c = self.make_chain_manager(prefix="chain-latest2-")
+        self.create_chain_dirs(tmp, ["chain-20200101", "chain-20200102", "chain-20200103"])
+        latest = c.latest_chain_dir()
+        assert latest.name == "chain-20200103"
 
-    def test_chainmanager_prune_temp_files(self):
-        with self.tempdir(prefix="chain-prune-tmp-") as tmp:
-            c = ChainManager(tmp, "TEST", self.logger)
-            chain_dir = tmp / "chain-20200101"
-            chain_dir.mkdir(exist_ok=True)
+    def test_chainmanager_prune_temp_files_removes_old_temp_files(self):
+        tmp, c = self.make_chain_manager(prefix="chain-prune-tmp-")
+        chain_dir = tmp / "chain-20200101"
+        chain_dir.mkdir(exist_ok=True)
 
-            # Create some temp files that should be cleaned up
-            (chain_dir / "backup1.zfs.gz.tmp").write_bytes(b"temp data")
-            (chain_dir / "backup2.zfs.gz").write_bytes(b"real data")
-            (tmp / "old-temp-file.tmp").write_bytes(b"old temp")
+        # Create some temp files that should be cleaned up
+        self.write_file(chain_dir / "backup1.zfs.gz.tmp", b"temp data")
+        self.write_file(chain_dir / "backup2.zfs.gz", b"real data")
+        self.write_file(tmp / "old-temp-file.tmp", b"old temp")
 
-            # Set old timestamp on temp files to simulate old files
-            import time
+        # Set old timestamp on temp files to simulate old files
+        import time
 
-            old_time = time.time() - 86400  # 1 day ago
-            import os
+        old_time = time.time() - 86400  # 1 day ago
+        import os
 
-            os.utime(chain_dir / "backup1.zfs.gz.tmp", (old_time, old_time))
-            os.utime(tmp / "old-temp-file.tmp", (old_time, old_time))
+        os.utime(chain_dir / "backup1.zfs.gz.tmp", (old_time, old_time))
+        os.utime(tmp / "old-temp-file.tmp", (old_time, old_time))
 
-            c.prune_old(1, dry_run=False)
+        c.prune_old(1, dry_run=False)
 
-            # Temp files should be gone, real files should remain
-            assert not (chain_dir / "backup1.zfs.gz.tmp").exists()
-            assert not (tmp / "old-temp-file.tmp").exists()
-            assert (chain_dir / "backup2.zfs.gz").exists()
+        # Temp files should be gone, real files should remain
+        self.assert_file_not_exists(chain_dir / "backup1.zfs.gz.tmp")
+        self.assert_file_not_exists(tmp / "old-temp-file.tmp")
+        self.assert_file_exists(chain_dir / "backup2.zfs.gz")
 
-    def test_logger_file_logging(self):
+    def test_logger_writes_messages_to_log_file(self):
         import os
 
         # Use TestBase tempdir to ensure cleanup
@@ -379,21 +372,18 @@ class LocalScriptTests(TestBase):
             logger = Logger(verbose=False)
             logger.log_file_path = str(log_path)
 
-            # Reopen the log file
-            logger.log_file = open(log_path, "a")
+            # Attach log file to logger using harness helper
+            self.set_logger_logfile(logger, log_path)
 
             logger.info("Test info message")
             logger.error("Test error message")
             logger.always("Test always message")
 
-            logger.log_file.close()
-
             # Check that messages were written to file
-            with open(log_path, "r") as f:
-                content = f.read()
-                assert "Test info message" in content
-                assert "Test error message" in content
-                assert "Test always message" in content
+            content = self.read_log(log_path)
+            assert "Test info message" in content
+            assert "Test error message" in content
+            assert "Test always message" in content
 
     def test_args_dataclass(self):
         # Test Args dataclass creation with defaults
@@ -407,31 +397,29 @@ class LocalScriptTests(TestBase):
         assert args.dry_run == False
         assert args.verbose == False
 
-    def test_main_parse_args_basic(self):
+    def test_main_parse_args_parses_backup_and_restore(self):
         import sys
 
-        orig_argv = sys.argv
-        try:
-            # Test basic backup args
-            sys.argv = ["script", "--action", "backup", "--dataset", "rpool/test", "--mount", "/mnt/backup"]
+        # Test basic backup args
+        # Test basic backup args
+        with self.patched(sys, "argv", ["script", "--action", "backup", "--dataset", "rpool/test", "--mount", "/mnt/backup"]):
             main = Main()
             main.parse_args()
             assert main.args.action == "backup"
             assert main.args.dataset == "rpool/test"
             assert main.args.mount_point == "/mnt/backup"
 
-            # Test restore args
-            sys.argv = ["script", "--action", "restore", "--dataset", "rpool/test", "--mount", "/mnt/backup", "--restore-pool", "newpool"]
+        # Test restore args
+        with self.patched(sys, "argv", ["script", "--action", "restore", "--dataset", "rpool/test", "--mount", "/mnt/backup", "--restore-pool", "newpool"]):
             main = Main()
             main.parse_args()
             assert main.args.action == "restore"
             assert main.args.restore_pool == "newpool"
-        finally:
-            sys.argv = orig_argv
 
-    def test_main_parse_args_missing(self):
+    def test_main_parse_args_missing_required_args_exits(self):
         import sys
 
+        # Test missing required args (should exit)
         # Test missing required args (should exit)
         with self.patched(sys, "argv", ["script", "--action", "backup"]):
             main = Main()
@@ -441,65 +429,73 @@ class LocalScriptTests(TestBase):
             except SystemExit as e:
                 assert e.code == CONFIG.EXIT_INVALID_ARGS
 
-    def test_main_validate_mocked(self):
+    def test_main_validate_authorization_and_binary_checks(self):
         import os
 
+        # Mock all validation checks to pass
         # Mock all validation checks to pass
         with self.patched(os, "geteuid", lambda: 0):
             with self.patched(ZFS, "is_dataset_exists", lambda dataset: True):
                 with self.patched(Cmd, "has_required_binaries", lambda logger, rate=None: True):
-                    args = Args(action="backup", dataset="rpool/test", mount_point=tempfile.gettempdir())
-                    main = Main()
-                    main.args = args
-                    main.logger = self.logger
+                    with self.tempdir(prefix="validate-") as td:
+                        args = Args(action="backup", dataset="rpool/test", mount_point=str(td))
+                        main = Main()
+                        main.args = args
+                        main.logger = self.logger
 
-                    # Should not raise any exceptions
-                    main.validate()
+                        # Should not raise any exceptions
+                        main.validate()
 
-                    # Test validation failure for non-root
-                    with self.patched(os, "geteuid", lambda: 1000):
-                        try:
-                            main.validate()
-                            assert False, "Should have raised ValidationError for non-root"
-                        except ValidationError:
-                            pass
+                        # Test validation failure for non-root
+                        with self.patched(os, "geteuid", lambda: 1000):
+                            try:
+                                main.validate()
+                                assert False, "Should have raised ValidationError for non-root"
+                            except ValidationError:
+                                pass
 
     def test_base_manager_init(self):
-        args = Args(action="backup", dataset="rpool/test", mount_point=tempfile.gettempdir(), prefix="TEST")
-        manager = BaseManager(args, self.logger)
+        with self.tempdir(prefix="base-manager-") as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST")
+            manager = BaseManager(args, self.logger)
 
-        assert manager.args == args
-        assert manager.logger == self.logger
-        assert manager.dry_run == args.dry_run
-        assert manager.prefix == "TEST"
-        assert "rpool_test" in str(manager.target_dir)
+            assert manager.args == args
+            assert manager.logger == self.logger
+            assert manager.dry_run == args.dry_run
+            assert manager.prefix == "TEST"
+            assert "rpool_test" in str(manager.target_dir)
 
     def test_backup_manager_init(self):
-        args = Args(action="backup", dataset="rpool/test", mount_point=tempfile.gettempdir(), prefix="TEST")
-        manager = BackupManager(args, self.logger)
+        with self.tempdir(prefix="backup-manager-") as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST")
+            manager = BackupManager(args, self.logger)
 
-        assert manager.args == args
-        assert manager.logger == self.logger
-        assert manager.dry_run == args.dry_run
-        assert manager.prefix == "TEST"
-        assert "rpool_test" in str(manager.target_dir)
+            assert manager.args == args
+            assert manager.logger == self.logger
+            assert manager.dry_run == args.dry_run
+            assert manager.prefix == "TEST"
+            assert "rpool_test" in str(manager.target_dir)
 
     def test_restore_manager_init(self):
-        args = Args(action="restore", dataset="rpool/test", mount_point=tempfile.gettempdir(), restore_pool="newpool", prefix="TEST")
-        manager = RestoreManager(args, self.logger)
+        with self.tempdir(prefix="restore-manager-") as td:
+            args = Args(action="restore", dataset="rpool/test", mount_point=str(td), restore_pool="newpool", prefix="TEST")
+            manager = RestoreManager(args, self.logger)
 
-        assert manager.args == args
-        assert manager.logger == self.logger
-        assert manager.dry_run == args.dry_run
-        assert manager.prefix == "TEST"
-        assert "rpool_test" in str(manager.target_dir)
+            assert manager.args == args
+            assert manager.logger == self.logger
+            assert manager.dry_run == args.dry_run
+            assert manager.prefix == "TEST"
+            assert "rpool_test" in str(manager.target_dir)
 
     def test_backup_mode_decision(self):
         # Test backup mode decision logic (mocked)
-        tmp_dir = Path(self.mktemp_dir(prefix="backup-mode-"))
-        try:
+        with self.tempdir(prefix="backup-mode-") as tmp_dir:
             args = Args(
-                action="backup", dataset="rpool/test", mount_point=str(tmp_dir), interval=7, dry_run=True  # Important: dry run to avoid actual operations
+                action="backup",
+                dataset="rpool/test",
+                mount_point=str(tmp_dir),
+                interval=7,
+                dry_run=True,  # Important: dry run to avoid actual operations
             )
             manager = BackupManager(args, self.logger)
 
@@ -507,25 +503,22 @@ class LocalScriptTests(TestBase):
             manager.target_dir.mkdir(parents=True, exist_ok=True)
 
             # Test when no last_chain_file exists (should do full backup)
-            assert not manager.last_chain_file.exists()
+            self.assert_file_not_exists(manager.last_chain_file)
 
             # Create a fake last_chain_file and chain directory
             chain_name = "chain-20240101"
-            manager.last_chain_file.write_text(chain_name)
+            self.write_file(manager.last_chain_file, chain_name)
             chain_dir = manager.target_dir / chain_name
             chain_dir.mkdir(parents=True, exist_ok=True)
 
             # Create a fake full backup file with old timestamp
             full_file = chain_dir / "TEST-full-20240101120000.zfs.gz"
-            full_file.write_bytes(b"fake backup data")
+            self.write_file(full_file, b"fake backup data")
 
             # The backup method would decide between full/diff based on age
             # We can't easily test this without mocking datetime, but we can verify the file exists
-            assert full_file.exists()
-            assert manager.last_chain_file.exists()
-
-        finally:
-            pass  # cleanup handled by TestBase.cleanup()
+            self.assert_file_exists(full_file)
+            self.assert_file_exists(manager.last_chain_file)
 
     def test_exceptions(self):
         # Test that our custom exceptions work
@@ -541,6 +534,12 @@ class LocalScriptTests(TestBase):
 
         # ValidationError should be a subclass of FatalError
         assert issubclass(ValidationError, FatalError)
+
+    # The following tests are destructive and require actual ZFS pools/datasets.
+    # They are intended to be run in a controlled test environment (like a VM)
+    # where they can create and destroy ZFS pools and datasets without risk.
+    # These tests will create a source dataset, perform backups to a temporary
+    # directory, and restore to a separate pool, verifying data integrity.
 
     def test_destructive_full_backup_and_restore(self) -> None:
         ctx = self.ctx
@@ -567,7 +566,7 @@ class LocalScriptTests(TestBase):
         # Presence
         for rel in ["test_file.txt", "test_dir/subdir_file.txt", "binary_test.bin"]:
             p = Path(ctx["mount_point"]) / rel
-            self.assert_true(p.exists(), f"Restored file not found: {p}")
+            self.assert_file_exists(p, f"Restored file not found: {p}")
         # Content
         expected_initial = {
             "test_file.txt": "This is test data for ZFS backup testing\n",
@@ -575,7 +574,7 @@ class LocalScriptTests(TestBase):
         }
         for rel, exp in expected_initial.items():
             p = Path(ctx["mount_point"]) / rel
-            self.assert_equal(p.read_text(), exp, f"Content mismatch in {rel}")
+            self.assert_file_text_equal(p, exp, f"Content mismatch in {rel}")
         binp = Path(ctx["mount_point"]) / "binary_test.bin"
         self.assert_equal(binp.read_bytes(), bytes([0x00, 1, 2, 3, 4, 5]), "Binary content mismatch")
 
@@ -584,9 +583,10 @@ class LocalScriptTests(TestBase):
 
         # Write files into the source dataset mount to create an incremental change
         src_mount = Path("/") / ctx["dataset"]
-        (src_mount / "test_file.txt").write_text("test data for backup verification")
+        self.write_file(src_mount / "test_file.txt", "test data for backup verification")
+        # Ensure subdir exists and write
         (src_mount / "subdir").mkdir(parents=True, exist_ok=True)
-        (src_mount / "subdir" / "test2.txt").write_text("test data 2 for backup verification")
+        self.write_file(src_mount / "subdir" / "test2.txt", "test data 2 for backup verification")
 
         # Run incremental backup
         self.run_backup(ctx["dataset"], ctx["backup_dir"], "Incremental backup")
@@ -613,7 +613,7 @@ class LocalScriptTests(TestBase):
         ]
         for rel, exp in checks:
             p = mount_point / rel
-            self.assert_equal(p.read_text().strip(), exp, f"Content mismatch in {rel}")
+            self.assert_file_text_equal_stripped(p, exp, f"Content mismatch in {rel}")
         # Cleanup mount/dataset
         self.run_cmd(["zfs", "umount", restored_dataset], check=False)
         self.run_cmd(["zfs", "destroy", f"{ctx['restore_pool']}/data"], check=False)
