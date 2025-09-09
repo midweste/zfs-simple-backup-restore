@@ -48,12 +48,25 @@ def main():
 
     # Create tester using the local harness implementation
     tester = LocalScriptTests()
+
     # Run tests with tester's logger and run inside project dir for consistent imports/CWD
+    ctx = None
+    success = False
     try:
         with tester.temp_chdir(project_dir):
+            # Prepare destructive environment so destructive tests can use tester.ctx
+            # This will enforce root requirement via TestBase.ensure_root_or_exit()
+            ctx = tester.destructive_env_setup()
+            tester.ctx = ctx
+
             success = tester.run_all(tester.logger)
     finally:
-        # Ensure any temporary dirs created via TestBase are cleaned up
+        # Ensure destructive teardown and any temporary dirs are cleaned up
+        try:
+            if ctx:
+                tester.destructive_env_teardown(ctx)
+        except Exception:
+            pass
         try:
             if hasattr(tester, "cleanup"):
                 tester.cleanup()
