@@ -36,6 +36,7 @@ from zfs_simple_backup_restore import (
     FatalError,
 )
 
+
 def main():
     """Run non-destructive unit tests"""
     print("=== ZFS Backup/Restore Non-Destructive Unit Tests ===")
@@ -110,7 +111,6 @@ class LocalScriptTests:
             ("Args dataclass creation", self.test_args_dataclass),
             ("Main parse_args basic", self.test_main_parse_args_basic),
             ("Main parse_args missing required", self.test_main_parse_args_missing),
-            # ("Main parse_args test mode", self.test_main_parse_args_test_mode),  # removed: --test flag no longer supported
             ("Main validate checks", self.test_main_validate_mocked),
             ("BaseManager init", self.test_base_manager_init),
             ("BackupManager init", self.test_backup_manager_init),
@@ -656,6 +656,7 @@ class LocalScriptTests:
 
         # ValidationError should be a subclass of FatalError
         assert issubclass(ValidationError, FatalError)
+
 
 if __name__ == "__main__":
     main()
