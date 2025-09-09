@@ -92,13 +92,13 @@ Run all tests:
 
 ```bash
 # From the repository root
-tests/run-vagrant-tests.sh --provision
+tests/run-tests.sh
 
-# Subsequent runs (no reprovision):
-tests/run-vagrant-tests.sh
+# Subsequent runs (reuses the VM):
+tests/run-tests.sh
 
-# Destroy the VM after a run:
-tests/run-vagrant-tests.sh --destroy
+# Destroy the VM before a run:
+tests/run-tests.sh --destroy
 ```
 
 What it does:
