@@ -1,6 +1,6 @@
 # zfs-simple-backup-restore
 
-Simple, atomic ZFS backup & restore tooling for file level zfs backups with chain-based full/differential backups, gzip/pigz compression, chain retention, and safe restore helpers.
+Simple, atomic ZFS backup & restore tooling for file-level ZFS backups with chain-based full/differential backups, gzip/pigz compression, chain retention, and safe restore helpers.
 
 **Important:** This tool is designed to work with its own backup files and chain structure. While it can technically restore any gzipped ZFS stream, it should not be used as a general-purpose ZFS restore utility for backups created by other tools.
 
@@ -31,28 +31,28 @@ Note: The repository includes tests that mock `subprocess.run` for many ZFS beha
 ## Examples and usage
 ```
   # 1. Run daily backup, full every Sunday, keep 2 weeks of backup chains
-  sudo zfs-simple-backup-restore.py --action backup --dataset rpool/data --mount /mnt/backups/zfs --interval 7 --retention 2
+  sudo python3 zfs_simple_backup_restore.py --action backup --dataset rpool/data --mount /mnt/backups/zfs --interval 7 --retention 2
 
   # 2. Limit backup bandwidth to 10 MB/s
-  sudo zfs-simple-backup-restore.py --action backup --dataset rpool --mount /mnt/backups/zfs --interval 7 --retention 2 --rate 10M
+  sudo python3 zfs_simple_backup_restore.py --action backup --dataset rpool --mount /mnt/backups/zfs --interval 7 --retention 2 --rate 10M
 
   # 3. Set a custom prefix for snapshot and file names
-  sudo zfs-simple-backup-restore.py --action backup --dataset rpool --mount /mnt/backups/zfs --prefix MYBACKUP
+  sudo python3 zfs_simple_backup_restore.py --action backup --dataset rpool --mount /mnt/backups/zfs --prefix MYBACKUP
 
   # 4. Restore the most recent backup chain into a pool named "restored"
-  sudo zfs-simple-backup-restore.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored
+  sudo python3 zfs_simple_backup_restore.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored
 
   # 5. Non-interactive restore (skip confirmation prompt)
-  sudo zfs-simple-backup-restore.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored --force
+  sudo python3 zfs_simple_backup_restore.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored --force
 
   # 6. Cleanup expired chain folders and orphaned snapshots only (no backup/restore)
-  sudo zfs-simple-backup-restore.py --action cleanup --dataset rpool --mount /mnt/backups/zfs --retention 2
+  sudo python3 zfs_simple_backup_restore.py --action cleanup --dataset rpool --mount /mnt/backups/zfs --retention 2
 
   # 7. Dry-run backup (shows what would happen, does not run)
-  sudo zfs-simple-backup-restore.py --action backup --dataset rpool --mount /mnt/backups/zfs --dry-run
+  sudo python3 zfs_simple_backup_restore.py --action backup --dataset rpool --mount /mnt/backups/zfs --dry-run
 
   # 8. Dry-run restore (shows what would happen, does not run)
-  sudo zfs-simple-backup-restore.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored --dry-run
+  sudo python3 zfs_simple_backup_restore.py --action restore --dataset rpool --mount /mnt/backups/zfs --restore-pool restored --dry-run
 
 ```
 
@@ -73,15 +73,15 @@ CRON JOB EXAMPLES:
 
 ```bash
 # Run a daily backup at 1am, full every 7 days, keep 2 chains.
-0 1 * * * root /usr/local/bin/zfs-simple-backup-restore.py --action backup --dataset rpool --mount /mnt/backups/zfs --interval 7 --retention 2
+0 1 * * * root /usr/local/bin/zfs_simple_backup_restore.py --action backup --dataset rpool --mount /mnt/backups/zfs --interval 7 --retention 2
 
 # Run cleanup daily at 1:30am to prune old chains and orphaned snapshots.
-30 1 * * * root /usr/local/bin/zfs-simple-backup-restore.py --action cleanup --dataset rpool --mount /mnt/backups/zfs --retention 2
+30 1 * * * root /usr/local/bin/zfs_simple_backup_restore.py --action cleanup --dataset rpool --mount /mnt/backups/zfs --retention 2
 ```
 
 ## Testing (Vagrant)
 
-We provide a single Vagrant workflow that runs both suites: non-destructive first, then destructive.
+We provide a single Vagrant workflow that runs the unit test suite.
 
 Prerequisites:
 
@@ -105,32 +105,24 @@ What it does:
 
 - Boots an Ubuntu 22.04 VM
 - Installs Python 3 and ZFS tools (zfsutils-linux, zfs-dkms, linux-headers, pv, pigz)
-- Runs `tests/suites/test_non_destructive.py`
-- Runs `tests/suites/test_destructive.py`
+-- Runs the combined test runner in `tests/suites/tests.py`
 
 Notes:
 
 - Destructive tests create and destroy ZFS pools/datasets using file-based vdevs. This happens inside the VM.
 - Restore uses `-f/--force` for non-interactive confirmations inside the tests.
-- DKMS may rebuild the ZFS module on first provision; this can take a few minutes.
 - Do not run destructive tests on bare metal; use the VM workflow above.
-
-## Adding tests
-
-- Unit tests in `test_non_destructive.py` currently mock `subprocess.run` for ZFS checks and cover the majority of logic. Consider adding:
-  - Integration tests that run in an isolated VM or CI environment (separate tests that actually call `zfs send` / `zfs receive`).
-  - Tests for edge cases: corrupted `last_chain` file, missing mount point, partially written `.tmp` files.
 
 ## Contributing
 
 - Fork the repo and open pull requests for fixes/features.
 - Run the test suite locally before submitting.
-- Keep formatting consistent with Black (the repo intentionally allows long lines; see Black config above).
+-- Keep formatting consistent; you can run Black if desired (no enforced configuration included in this repo).
 
 ## Safety notes
 
-- This project touches real filesystems and ZFS datasets; do not run destructive tests on machines with data you care about.
-- Prefer VMs or isolated CI runners for destructive integration tests.
+- This project touches real filesystems and ZFS datasets.
+- Use included Vagrant to run integration tests.
 
 ## License
 
