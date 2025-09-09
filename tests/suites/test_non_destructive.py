@@ -12,19 +12,13 @@ from pathlib import Path
 
 from test_base import TestBase
 
-# Add the project root to Python path so we can import the main module
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
 # Guard: only allow running this script when invoked via tests/run-tests.sh which sets RUN_TESTS=1
 if os.environ.get("RUN_TESTS") != "1":
     print("ERROR: non-destructive tests must be run via tests/run-tests.sh (use that script to run tests)")
     sys.exit(2)
 
-# Try to import shared ScriptTests; fall back to the local implementation below if missing
-try:
-    from zfs_simple_backup_restore_tests import ScriptTests  # optional shared tests
-except Exception:
-    ScriptTests = None
+# This test suite is designed to run from the test orchestrator (tests/run-tests.sh)
+# and expects the project package to be installed in the test environment.
 
 # Import project symbols used by the tests
 from zfs_simple_backup_restore import (
@@ -42,13 +36,7 @@ from zfs_simple_backup_restore import (
     ZFS,
 )
 
-# ValidationError may be defined in the project; import if available, otherwise define a local placeholder
-try:
-    from zfs_simple_backup_restore import ValidationError
-except Exception:
-
-    class ValidationError(FatalError):
-        pass
+from zfs_simple_backup_restore import ValidationError
 
 
 def main():
@@ -58,15 +46,8 @@ def main():
     project_dir = Path(__file__).parent.parent.parent
     sys.path.insert(0, str(project_dir))
 
-    # Create tester using shared logger from TestBase (constructor sets it up)
-    TesterClass = ScriptTests if ScriptTests is not None else LocalScriptTests
-    try:
-        tester = TesterClass()  # Prefer zero-arg constructor
-    except TypeError:
-        # Fallback for external ScriptTests that still expect a logger
-        from test_base import TestBase
-
-        tester = TesterClass(TestBase().logger)
+    # Create tester using the local harness implementation
+    tester = LocalScriptTests()
     # Run tests with tester's logger and run inside project dir for consistent imports/CWD
     try:
         with tester.temp_chdir(project_dir):

@@ -23,5 +23,7 @@ vagrant up
 
 set -o pipefail
 echo "=== Running test suite ==="
-vagrant ssh -c "RUN_TESTS=1 python3 /vagrant/tests/suites/test_non_destructive.py"
-vagrant ssh -c "sudo modprobe zfs || true; cd /vagrant && sudo env RUN_TESTS=1 python3 tests/suites/test_destructive.py"
+# Run non-destructive tests with PYTHONPATH pointing at the repo root inside the VM
+vagrant ssh -c "cd /vagrant && env RUN_TESTS=1 PYTHONPATH=/vagrant python3 tests/suites/test_non_destructive.py"
+# Run destructive tests as root (keep PYTHONPATH in the sudo environment)
+vagrant ssh -c "sudo modprobe zfs || true; cd /vagrant && sudo env RUN_TESTS=1 PYTHONPATH=/vagrant python3 tests/suites/test_destructive.py"
