@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Non-destructive unit tests for ZFS backup/restore tool.
+"""Unit tests for ZFS backup/restore tool.
 
 These tests mock external commands and don't require actual ZFS pools.
 """
@@ -13,7 +13,7 @@ from test_base import TestBase
 
 # Guard: only allow running this script when invoked via tests/run-tests.sh which sets RUN_TESTS=1
 if os.environ.get("RUN_TESTS") != "1":
-    print("ERROR: non-destructive tests must be run via tests/run-tests.sh (use that script to run tests)")
+    print("ERROR: tests must be run via tests/run-tests.sh (use that script to run tests)")
     sys.exit(2)
 
 # This test suite is designed to run from the test orchestrator (tests/run-tests.sh)
@@ -39,7 +39,7 @@ from zfs_simple_backup_restore import ValidationError
 
 
 def main():
-    """Run non-destructive unit tests"""
+    """Run unit tests"""
 
     # Change to the project directory
     project_dir = Path(__file__).parent.parent.parent
@@ -298,6 +298,136 @@ class TestSuite(TestBase):
         assert CONFIG.DEFAULT_INTERVAL_DAYS > 0
         assert CONFIG.DEFAULT_RETENTION_CHAINS > 0
         assert CONFIG.SCRIPT_ID == "zfs-simple-backup-restore"
+
+    def test_config_default_paths_and_lockfile(self):
+        # Ensure default lockfile contains lock dir and script id
+        ld = CONFIG.get_log_dir()
+        kd = CONFIG.get_lock_dir()
+        df = CONFIG.get_default_lockfile()
+        assert CONFIG.SCRIPT_ID in df
+        assert kd in df
+
+    def test_cmd_pv_and_gzip_behavior(self):
+        import shutil
+        import subprocess
+
+        # pv with no rate returns empty
+        assert Cmd.pv(None) == []
+        pv_cmd = Cmd.pv("10M")
+        assert pv_cmd and (pv_cmd[0].endswith("pv") or pv_cmd[0].endswith("pv"))
+        assert "-L" in pv_cmd and "10M" in pv_cmd
+
+        # Simulate pigz available and working
+        orig_which = shutil.which
+
+        def fake_which(name):
+            if name == "pigz":
+                return "/usr/bin/pigz"
+            if name == "gzip":
+                return "/usr/bin/gzip"
+            return orig_which(name)
+
+        def fake_run(cmd, **kw):
+            # pigz --version should succeed
+            if cmd and cmd[0].endswith("pigz") and "--version" in cmd:
+
+                class R:
+                    pass
+
+                return R()
+            return subprocess.run(cmd, **kw)
+
+        with self.patched(shutil, "which", fake_which):
+            with self.patched(subprocess, "run", fake_run):
+                gz = Cmd.gzip()
+                assert gz[0].endswith("pigz")
+
+        # Simulate pigz present but failing; should fallback to gzip
+        with self.patched(shutil, "which", lambda name: "/usr/bin/pigz" if name == "pigz" else "/usr/bin/gzip"):
+            with self.patched(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(Exception("fail"))):
+                gz2 = Cmd.gzip()
+                assert gz2[0].endswith("gzip")
+
+    def test_chainmanager_files_sorting_and_prune_tmp(self):
+        tmp, c = self.make_chain_manager(prefix="ctest-")
+        chain = tmp / "chain-20250101"
+        self.create_chain_dirs(tmp, ["chain-20250101"])
+
+        # Create full/diff files with specific timestamps embedded in names
+        self.write_file(chain / "CT-full-20250101000001.zfs.gz", b"a")
+        self.write_file(chain / "CT-diff-20250101000002.zfs.gz", b"a")
+        self.write_file(chain / "CT-full-20250101000000.zfs.gz", b"a")
+        files = c.files(chain)
+        names = [f.name for f in files]
+        assert names[0].endswith("-full-20250101000000.zfs.gz")
+        assert names[1].endswith("-full-20250101000001.zfs.gz")
+        assert names[2].endswith("-diff-20250101000002.zfs.gz")
+
+        # Create old temp files and ensure prune_old removes them
+        self.write_file(chain / "old.tmp", b"tmp")
+        self.write_file(tmp / "old-temp.tmp", b"tmp")
+        import time, os
+
+        old_time = time.time() - 7200
+        os.utime(chain / "old.tmp", (old_time, old_time))
+        os.utime(tmp / "old-temp.tmp", (old_time, old_time))
+
+        c.prune_old(10, dry_run=False)
+        self.assert_file_not_exists(chain / "old.tmp")
+        self.assert_file_not_exists(tmp / "old-temp.tmp")
+
+    def test_base_manager_validate_and_sanitize(self):
+        with self.tempdir(prefix="bm-") as td:
+            # Empty dataset should raise
+            args = Args(action="backup", dataset="", mount_point=str(td))
+            try:
+                BaseManager(args, self.logger)
+                assert False
+            except ValidationError:
+                pass
+
+            # Path traversal in dataset
+            args2 = Args(action="backup", dataset="../etc", mount_point=str(td))
+            try:
+                BaseManager(args2, self.logger)
+                assert False
+            except ValidationError:
+                pass
+
+            # Non-absolute mount point: BaseManager accepts it; ensure sanitized dataset name is used
+            args3 = Args(action="backup", dataset="rpool/test", mount_point="relative/path")
+            m3 = BaseManager(args3, self.logger)
+            assert "rpool_test" in str(m3.target_dir)
+
+            # Sanitization produces safe directory name
+            args4 = Args(action="backup", dataset="rpool/my-data", mount_point=str(td))
+            m = BaseManager(args4, self.logger)
+            assert "rpool_my-data" in str(m.target_dir)
+
+    def test_lockfile_context_ops(self):
+        with self.tempdir(prefix="locktest-") as td:
+            p = Path(td) / "test.lock"
+            with LockFile(p, self.logger):
+                self.assert_file_exists(p)
+            self.assert_file_not_exists(p)
+
+    def test_zfs_verify_backup_file_missing_and_zstreamdump_missing(self):
+        import subprocess
+
+        with self.tempdir(prefix="zfs-") as td:
+            f = Path(td) / "nope.zfs.gz"
+            assert not f.exists()
+            assert ZFS.verify_backup_file(f, self.logger) is False
+
+            # Create a file and simulate zstreamdump not installed
+            f2 = Path(td) / "file.zfs.gz"
+            self.write_file(f2, b"notazfs")
+
+            def fake_popen(*a, **kw):
+                raise FileNotFoundError()
+
+            with self.patched(subprocess, "Popen", fake_popen):
+                assert ZFS.verify_backup_file(f2, self.logger) is False
 
     def test_zfs_is_pool_exists_true(self):
         import subprocess

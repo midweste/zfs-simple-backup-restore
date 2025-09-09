@@ -43,8 +43,11 @@ class TestBase:
 
     # Minimal standardized output
     def test_result(self, description: str, ok: bool) -> None:
+        """Print a single-line test result with an icon for clarity."""
+        # Use a checkmark for pass and an X for fail for clearer output
+        icon = "✓" if ok else "✖"
         status = "Pass" if ok else "Failed"
-        print(f"{description} ... {status}")
+        print(f"{description} ... {icon} {status}")
 
     # Quiet subprocess runner (raises on error when check=True)
     def run_cmd(self, cmd: Sequence[str | int], check: bool = True) -> subprocess.CompletedProcess:
@@ -284,16 +287,18 @@ class TestBase:
             try:
                 fn()
                 # Prefer structured logger; fall back to stdout
+                msg = f"{name} ... ✓ Pass"
                 try:
-                    logger.always(f"{name} ... Pass")
+                    logger.always(msg)
                 except Exception:
-                    print(f"{name} ... Pass")
+                    print(msg)
                 passed += 1
             except Exception as e:
+                msg = f"{name} ... ✖ Failed: {e}"
                 try:
-                    logger.error(f"{name} ... Failed: {e}")
+                    logger.error(msg)
                 except Exception:
-                    print(f"{name} ... Failed: {e}")
+                    print(msg)
                 failed += 1
 
         print(f"\n=== TEST RESULTS: {passed} passed, {failed} failed ===")
