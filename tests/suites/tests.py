@@ -787,6 +787,67 @@ class TestSuite(TestBase):
                         assert not tmp_files, f"Temporary files were not cleaned up: {tmp_files}"
                         pass
 
+    def test_cmd_required_binaries_sets(self):
+        # Ensure required_binaries returns expected set and includes pv when rate provided
+        base = Cmd.required_binaries()
+        assert "zfs" in base and "gzip" in base and "zpool" in base
+        with_rate = Cmd.required_binaries(rate="10M")
+        assert "pv" in with_rate
+
+    def test_zfs_verify_backup_file_success(self):
+        """Simulate zstreamdump returning success and ensure verify_backup_file returns True."""
+        import subprocess
+        import io
+
+        with self.tempdir(prefix="zfs-verify-ok-") as td:
+            f = Path(td) / "ok.zfs.gz"
+            self.write_file(f, b"fakecontent")
+
+            class MockProc:
+                def __init__(self, returncode=0, stdout=None, stderr=None):
+                    self.returncode = returncode
+                    self.stdout = stdout
+                    self.stderr = stderr
+
+                def communicate(self, timeout=None):
+                    return (b"ok", b"")
+
+                def wait(self):
+                    return self.returncode
+
+            def fake_popen(cmd, stdout=None, stderr=None, stdin=None, **kw):
+                # gunzip -> provide stdout pipe
+                if cmd and isinstance(cmd, (list, tuple)) and cmd[0].endswith("gunzip"):
+                    return MockProc(returncode=0, stdout=io.BytesIO(b"data"))
+                # head -> provide stdout pipe
+                if cmd and isinstance(cmd, (list, tuple)) and cmd[0].endswith("head"):
+                    return MockProc(returncode=0, stdout=io.BytesIO(b"data"))
+                # zstreamdump -> return success
+                if cmd and isinstance(cmd, (list, tuple)) and cmd[0].endswith("zstreamdump"):
+                    p = MockProc(returncode=0, stdout=io.BytesIO(b"ok"))
+                    return p
+                return MockProc(returncode=0, stdout=io.BytesIO(b""))
+
+            with self.patched(subprocess, "Popen", fake_popen):
+                ok = ZFS.verify_backup_file(f, self.logger)
+                assert ok is True
+
+    def test_lockfile_raises_when_locked(self):
+        """Simulate flock raising and ensure LockFile.__enter__ raises FatalError."""
+        import zfs_simple_backup_restore as mod
+
+        def fake_flock(fd, flags):
+            raise Exception("already locked")
+
+        with self.tempdir(prefix="lockfail-") as td:
+            p = Path(td) / "x.lock"
+            with self.patched(mod.fcntl, "flock", fake_flock):
+                try:
+                    with LockFile(p, self.logger):
+                        assert False, "Should not acquire lock when flock fails"
+                except FatalError:
+                    pass
+
     def test_exceptions(self):
         # Test that our custom exceptions work
         try:
