@@ -650,6 +650,143 @@ class TestSuite(TestBase):
             self.assert_file_exists(full_file)
             self.assert_file_exists(manager.last_chain_file)
 
+    def test_backup_manager_backup_dry_run_no_subprocess(self):
+        """Ensure BackupManager.backup() in dry-run mode doesn't invoke subprocess and still writes last_chain."""
+        import subprocess
+
+        with self.tempdir(prefix="backup-dryrun-") as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=True)
+            manager = BackupManager(args, self.logger)
+
+            # Ensure no last_chain exists initially
+            self.assert_file_not_exists(manager.last_chain_file)
+
+            # Patch subprocess.Popen to fail if called (should not be called in dry-run)
+            with self.patched(subprocess, "Popen", lambda *a, **kw: (_ for _ in ()).throw(Exception("Popen should not be called in dry-run"))):
+                manager.backup()
+
+            # After backup in dry-run, last_chain_file should exist and contain chain name
+            self.assert_file_exists(manager.last_chain_file)
+            chain_name = manager.last_chain_file.read_text().strip()
+            chain_dir = manager.target_dir / chain_name
+            assert chain_dir.exists(), f"Expected chain dir created in dry-run: {chain_dir}"
+
+    def test_restore_manager_dry_run_no_subprocess(self):
+        """Ensure RestoreManager.restore() in dry-run verifies files but does not spawn subprocesses."""
+        import subprocess
+
+        with self.tempdir(prefix="restore-dryrun-") as td:
+            # Prepare a fake chain with one backup file
+            mgr_args = Args(action="restore", dataset="rpool/test", mount_point=str(td), restore_pool="restored", restore_chain="chain-20250101", dry_run=True)
+            # Create chain dir and a dummy backup file
+            target_dir = Path(mgr_args.mount_point) / mgr_args.dataset.replace("/", "_")
+            chain_dir = target_dir / mgr_args.restore_chain
+            chain_dir.mkdir(parents=True, exist_ok=True)
+            backup_file = chain_dir / "TEST-full-20250101000000.zfs.gz"
+            self.write_file(backup_file, b"notazfs")
+
+            # Patch ZFS.verify_backup_file to return True so restore proceeds to dry-run messages
+            with self.patched(ZFS, "verify_backup_file", lambda p, logger: True):
+                # Patch subprocess.Popen to raise if called (should not be in dry-run)
+                with self.patched(subprocess, "Popen", lambda *a, **kw: (_ for _ in ()).throw(Exception("Popen should not be called in dry-run restore"))):
+                    mgr = RestoreManager(mgr_args, self.logger)
+                    # Should complete without raising
+                    mgr.restore()
+
+    def test_backup_full_handles_zfs_send_failure(self):
+        """Simulate zfs send (p1) failing and ensure BackupManager handles it and raises FatalError."""
+        import subprocess
+        import io
+
+        with self.tempdir(prefix="backup-fail-zfs-") as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+            manager.target_dir.mkdir(parents=True, exist_ok=True)
+
+            # Ensure last_chain_file exists to create chain dir for writing
+            chain_name = manager.chain.today()
+            self.write_file(manager.last_chain_file, chain_name)
+            chain_dir = manager.target_dir / chain_name
+            chain_dir.mkdir(parents=True, exist_ok=True)
+
+            # Patch ZFS.run to be a no-op (so snapshot creation doesn't error)
+            with self.patched(ZFS, "run", lambda *a, **kw: None):
+
+                class MockProc:
+                    def __init__(self, returncode=0, communicate_ret=(b"", b""), stdout=None):
+                        self.returncode = returncode
+                        self._communicate_ret = communicate_ret
+                        self.stdout = stdout
+
+                    def communicate(self, timeout=None):
+                        return self._communicate_ret
+
+                    def wait(self):
+                        return self.returncode
+
+                def fake_popen(cmd, stdout=None, stderr=None, stdin=None, **kw):
+                    # p1 = zfs send -> simulate failure
+                    if isinstance(cmd, (list, tuple)) and any("send" in str(c) for c in cmd):
+                        return MockProc(returncode=1, communicate_ret=(b"", b"zfs send failed"), stdout=io.BytesIO(b""))
+                    # p2/p3 behave as successful
+                    return MockProc(returncode=0, communicate_ret=(b"", b""), stdout=io.BytesIO(b""))
+
+                with self.patched(subprocess, "Popen", fake_popen):
+                    try:
+                        manager.backup_full()
+                        assert False, "Expected FatalError due to zfs send failure"
+                    except FatalError:
+                        pass
+
+    def test_backup_full_handles_gzip_failure(self):
+        """Simulate gzip (p2/p3) failing and ensure BackupManager raises FatalError and cleans up tmpfile."""
+        import subprocess
+        import io
+
+        with self.tempdir(prefix="backup-fail-gzip-") as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+            manager.target_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create chain dir
+            chain_name = manager.chain.today()
+            chain_dir = manager.target_dir / chain_name
+            chain_dir.mkdir(parents=True, exist_ok=True)
+
+            with self.patched(ZFS, "run", lambda *a, **kw: None):
+
+                class MockProc:
+                    def __init__(self, returncode=0, communicate_ret=(b"", b""), stdout=None):
+                        self.returncode = returncode
+                        self._communicate_ret = communicate_ret
+                        self.stdout = stdout
+
+                    def communicate(self, timeout=None):
+                        return self._communicate_ret
+
+                    def wait(self):
+                        return self.returncode
+
+                def fake_popen(cmd, stdout=None, stderr=None, stdin=None, **kw):
+                    # p1 (zfs send) succeeds
+                    if isinstance(cmd, (list, tuple)) and any("send" in str(c) for c in cmd):
+                        return MockProc(returncode=0, communicate_ret=(b"", b""), stdout=io.BytesIO(b"streamdata"))
+                    # Simulate gzip failure (the last process) by returning non-zero for gzip command
+                    if isinstance(cmd, (list, tuple)) and (str(cmd[0]).endswith("pigz") or str(cmd[0]).endswith("gzip")):
+                        return MockProc(returncode=1, communicate_ret=(b"", b"gzip error"), stdout=io.BytesIO(b""))
+                    # pv or others succeed
+                    return MockProc(returncode=0, communicate_ret=(b"", b""), stdout=io.BytesIO(b""))
+
+                with self.patched(subprocess, "Popen", fake_popen):
+                    try:
+                        manager.backup_full()
+                        assert False, "Expected FatalError due to gzip failure"
+                    except FatalError:
+                        # Ensure tmpfile was cleaned up (no .tmp files remain)
+                        tmp_files = list(chain_dir.glob("*.tmp"))
+                        assert not tmp_files, f"Temporary files were not cleaned up: {tmp_files}"
+                        pass
+
     def test_exceptions(self):
         # Test that our custom exceptions work
         try:
