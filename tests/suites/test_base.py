@@ -14,6 +14,8 @@ class TestBase:
         self._temp_dirs: list[str] = []
         # Provide a shared logger for all suites. Prefer the project's Logger; fall back to StdLogger.
         self.logger = self._make_logger()
+        self.success = "✅"
+        self.failure = "🚨"
 
     def _make_logger(self):
         # Try to import the project's Logger by adding project root to sys.path if necessary.
@@ -45,7 +47,7 @@ class TestBase:
     def test_result(self, description: str, ok: bool) -> None:
         """Print a single-line test result with an icon for clarity."""
         # Use a checkmark for pass and an X for fail for clearer output
-        icon = "✓" if ok else "✖"
+        icon = self.success if ok else self.failure
         status = "Pass" if ok else "Failed"
         print(f"{description} ... {icon} {status}")
 
@@ -287,21 +289,21 @@ class TestBase:
             try:
                 fn()
                 # Prefer structured logger; fall back to stdout
-                msg = f"{name} ... ✓ Pass"
+                msg = f"{name} ... {self.success} Pass"
                 try:
                     logger.always(msg)
                 except Exception:
                     print(msg)
                 passed += 1
             except Exception as e:
-                msg = f"{name} ... ✖ Failed: {e}"
+                msg = f"{name} ... {self.failure} Failed: {e}"
                 try:
                     logger.error(msg)
                 except Exception:
                     print(msg)
                 failed += 1
 
-        print(f"\n=== TEST RESULTS: {passed} passed, {failed} failed ===")
+        print(f"\n=== TEST RESULTS: {passed} {self.success} Pass, {failed} {self.failure} Failed ===")
         return failed == 0
 
     # Auto-discovery of tests: run all instance methods named test_*
