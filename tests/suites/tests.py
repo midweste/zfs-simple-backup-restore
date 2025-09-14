@@ -101,6 +101,29 @@ class TestSuite(TestBase):
             ok2 = Cmd.has_required_binaries(self.logger, rate="10M")
             assert not ok2, "Expected has_required_binaries to return False when pv is missing and rate supplied"
 
+    def test_cmd__which_checks_sbin(self):
+        import shutil, os
+
+        # Simulate shutil.which not finding the binary, but it exists in /usr/sbin
+        with self.patched(shutil, "which", lambda name: None):
+
+            def fake_isfile(p):
+                return p == "/usr/sbin/zstreamdump"
+
+            def fake_access(p, mode):
+                return p == "/usr/sbin/zstreamdump"
+
+            with self.patched(os.path, "isfile", fake_isfile):
+                with self.patched(os, "access", fake_access):
+                    p = Cmd._which("zstreamdump")
+                    assert p == "/usr/sbin/zstreamdump", f"Expected /usr/sbin/zstreamdump, got {p}"
+
+    def test_cmd_head_helper(self):
+        head_cmd = Cmd.head("-c", "1024")
+        assert isinstance(head_cmd, list)
+        assert head_cmd[0].endswith("head"), f"Expected head command, got {head_cmd[0]}"
+        assert "-c" in head_cmd and "1024" in head_cmd
+
     def test_cmd_zfs_binary_detection(self):
         import shutil
 
