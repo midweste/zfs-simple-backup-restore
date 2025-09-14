@@ -10,4 +10,4 @@
 # Todo List
 - Review the readme and improve it
 - Add more tests for missing areas
-- Implement the process.pipeline helper to further harden subprocess handling
+- Implement a central process.pipeline helper to standardize pipeline error handling and make tests easier to mock.
