@@ -848,6 +848,92 @@ class TestSuite(TestBase):
                 except FatalError:
                     pass
 
+    def test_backup_differential_no_base_full_raises(self):
+        """If no base full exists in the chain, backup_differential should raise FatalError."""
+        with self.tempdir(prefix="bdiff-nobase-") as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+            manager.target_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create last_chain_file and chain dir but no full files
+            chain_name = "chain-20250101"
+            self.write_file(manager.last_chain_file, chain_name)
+            chain_dir = manager.target_dir / chain_name
+            chain_dir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                manager.backup_differential()
+                assert False, "Expected FatalError when no base full snapshot exists"
+            except FatalError:
+                pass
+
+    def test_restore_snapshot_not_found_raises(self):
+        """If requested restore_snapshot cannot be found in chain, restore() should raise FatalError."""
+        with self.tempdir(prefix="restore-snap-") as td:
+            args = Args(
+                action="restore",
+                dataset="rpool/test",
+                mount_point=str(td),
+                restore_pool="restored",
+                restore_chain="chain-20250101",
+                restore_snapshot="nope",
+                dry_run=True,
+            )
+            target_dir = Path(args.mount_point) / args.dataset.replace("/", "_")
+            chain_dir = target_dir / args.restore_chain
+            chain_dir.mkdir(parents=True, exist_ok=True)
+            # create one backup file that won't match 'nope'
+            self.write_file(chain_dir / "TEST-full-20250101000000.zfs.gz", b"data")
+
+            # Ensure verification passes so logic reaches snapshot lookup
+            with self.patched(ZFS, "verify_backup_file", lambda p, logger: True):
+                mgr = RestoreManager(args, self.logger)
+                try:
+                    mgr.restore()
+                    assert False, "Expected FatalError when restore snapshot not found"
+                except FatalError:
+                    pass
+
+    def test_main_run_handles_fatalerror_exit(self):
+        """Main.run should exit with error code when BackupManager.backup raises FatalError."""
+        import zfs_simple_backup_restore as mod
+        import sys
+
+        with self.tempdir(prefix="main-run-") as td:
+            mount = td
+            # Prepare argv for a backup run
+            with self.patched(sys, "argv", ["script", "--action", "backup", "--dataset", "rpool/test", "--mount", str(mount)]):
+                # Patch validations to pass initially
+                with self.patched(Cmd, "has_required_binaries", lambda logger, rate=None: True):
+                    with self.patched(os, "geteuid", lambda: 0):
+                        with self.patched(ZFS, "is_dataset_exists", lambda d: True):
+                            # Replace BackupManager with one that raises FatalError on backup()
+                            class DummyBM:
+                                def __init__(self, args, logger):
+                                    pass
+
+                                def backup(self):
+                                    raise FatalError("simulated")
+
+                            with self.patched(mod, "BackupManager", DummyBM):
+                                # Patch LockFile to a no-op context manager
+                                class DummyLock:
+                                    def __init__(self, *a, **kw):
+                                        pass
+
+                                    def __enter__(self):
+                                        return self
+
+                                    def __exit__(self, exc_type, exc, tb):
+                                        return False
+
+                                with self.patched(mod, "LockFile", DummyLock):
+                                    try:
+                                        Main().run()
+                                        assert False, "Expected SystemExit from Main.run on FatalError"
+                                    except SystemExit as e:
+                                        assert e.code == CONFIG.EXIT_INVALID_ARGS
+
     def test_exceptions(self):
         # Test that our custom exceptions work
         try:

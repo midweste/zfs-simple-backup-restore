@@ -38,12 +38,14 @@ class CONFIG:
     @staticmethod
     def get_log_dir():
         import os
-        return os.environ.get('ZFS_BACKUP_LOG_DIR', '/var/log')
+
+        return os.environ.get("ZFS_BACKUP_LOG_DIR", "/var/log")
 
     @staticmethod
     def get_lock_dir():
         import os
-        return os.environ.get('ZFS_BACKUP_LOCK_DIR', '/var/lock')
+
+        return os.environ.get("ZFS_BACKUP_LOCK_DIR", "/var/lock")
 
     @staticmethod
     def get_default_lockfile():
@@ -129,8 +131,12 @@ class Cmd:
         return Cmd.gzip("-dc", *args)
 
     @staticmethod
+    def zstreamdump(*args):
+        return [shutil.which("zstreamdump") or "zstreamdump"] + list(args)
+
+    @staticmethod
     def required_binaries(rate=None):
-        bins = {"zfs", "zpool", "gzip"}
+        bins = {"zfs", "zpool", "gzip", "zstreamdump", "head"}
         if rate:
             bins.add("pv")
         return bins
@@ -331,13 +337,17 @@ class ZFS:
         try:
             # Attempt a quick header verification using zstreamdump over the first 1KB
             # We avoid bash-specific process substitution for portability in minimal environments.
+            # Resolve binaries via Cmd helpers so cron runs use absolute paths
+            gunzip_cmd = Cmd.gunzip(str(file_path))
             gunzip_proc = subprocess.Popen(
-                ["gunzip", "-c", str(file_path)],
+                gunzip_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
+
+            head_cmd = [shutil.which("head") or "head", "-c", "1024"]
             head_proc = subprocess.Popen(
-                ["head", "-c", "1024"],
+                head_cmd,
                 stdin=gunzip_proc.stdout,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -347,7 +357,7 @@ class ZFS:
                 gunzip_proc.stdout.close()
 
             zstreamdump_proc = subprocess.Popen(
-                ["zstreamdump", "-v"],
+                Cmd.zstreamdump("-v"),
                 stdin=head_proc.stdout,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
