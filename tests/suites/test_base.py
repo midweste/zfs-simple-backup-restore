@@ -280,6 +280,33 @@ class TestBase:
                 except Exception:
                     setattr(obj, attr, original)
 
+    @contextmanager
+    def patched_pipeline(self, run_side_effect=None):
+        """Patch the central ProcessPipeline class used by the project to return a mock.
+
+        The mock's run_with_rate_limit will by default write a small tmpfile at the
+        provided tmpfile path so tests can rely on real Path.stat behavior. A custom
+        side-effect callable may be provided with signature
+            fn(source_cmd, tmpfile, rate, compression_cmd)
+        """
+        from unittest.mock import Mock, patch
+
+        def default_side_effect(source_cmd, tmpfile, rate, compression_cmd):
+            # ensure parent exists and write a small file to simulate pipeline output
+            Path(tmpfile).parent.mkdir(parents=True, exist_ok=True)
+            Path(tmpfile).write_bytes(b"fake backup data")
+
+        side = run_side_effect or default_side_effect
+        with patch("zfs_simple_backup_restore.ProcessPipeline") as mock_pipeline_class:
+            mock_pipeline = Mock()
+            mock_pipeline.run_with_rate_limit.side_effect = side
+            mock_pipeline_class.return_value = mock_pipeline
+            try:
+                yield mock_pipeline
+            finally:
+                # cleanup any leftover tmpfiles the side_effect may have created is left to the caller's tempdir
+                pass
+
     # Generic test runner: takes a list of (name, callable) and a logger with .always/.error
     def run_tests(self, tests: Sequence[tuple[str, Any]], logger: Any) -> bool:
         passed = 0

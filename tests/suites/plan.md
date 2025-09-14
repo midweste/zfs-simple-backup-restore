@@ -10,4 +10,5 @@
 # Todo List
 - Review the readme and improve it
 - Add more tests for missing areas
-- Implement a central process.pipeline helper to standardize pipeline error handling and make tests easier to mock.
+- Finish writing tests that have # Skip this test for now as it's complex to mock properly
+- Rewrite tests to use the central pipeline handler

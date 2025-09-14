@@ -176,6 +176,144 @@ class Cmd:
         return True
 
 
+# ========== ProcessPipeline ==========
+class ProcessPipeline:
+    """Centralized subprocess pipeline helper for standardized error handling and easier testing."""
+
+    def __init__(self, logger: Logger):
+        self.logger = logger
+
+    def run_simple(self, cmd: list, check: bool = True, capture_output: bool = False, timeout: int = None, **kwargs) -> subprocess.CompletedProcess:
+        """Run a simple subprocess command with standardized error handling."""
+        try:
+            self.logger.info(f"Running: {' '.join(cmd)}")
+            result = subprocess.run(cmd, check=check, capture_output=capture_output, timeout=timeout, **kwargs)
+            return result
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Command failed: {' '.join(cmd)} (exit code: {e.returncode})")
+            if e.stderr:
+                self.logger.error(f"stderr: {e.stderr.decode().strip()}")
+            raise
+        except subprocess.TimeoutExpired as e:
+            self.logger.error(f"Command timed out after {timeout}s: {' '.join(cmd)}")
+            raise
+        except FileNotFoundError as e:
+            self.logger.error(f"Command not found: {cmd[0]}")
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error running command {' '.join(cmd)}: {e}")
+            raise
+
+    def run_pipeline(self, commands: list, input_data: bytes = None, timeout: int = None) -> bytes:
+        """Run a pipeline of commands with proper error handling and cleanup."""
+        if not commands:
+            raise ValueError("No commands provided for pipeline")
+
+        processes = []
+        try:
+            # Start first process
+            self.logger.info(f"Running pipeline: {' | '.join(' '.join(cmd) for cmd in commands)}")
+
+            if input_data is not None:
+                processes.append(subprocess.Popen(commands[0], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+                processes[0].stdin.write(input_data)
+                processes[0].stdin.close()
+            else:
+                processes.append(subprocess.Popen(commands[0], stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+
+            # Start subsequent processes in pipeline
+            for i, cmd in enumerate(commands[1:], 1):
+                processes.append(
+                    subprocess.Popen(cmd, stdin=processes[i - 1].stdout, stdout=subprocess.PIPE if i < len(commands) - 1 else None, stderr=subprocess.PIPE)
+                )
+                # Close stdout of previous process to allow SIGPIPE
+                processes[i - 1].stdout.close()
+
+            # Wait for all processes and collect output
+            stdout, stderr = processes[-1].communicate(timeout=timeout)
+
+            # Check for errors in any process
+            for i, proc in enumerate(processes):
+                if proc.returncode and proc.returncode != 0:
+                    cmd_str = " ".join(commands[i])
+                    error_msg = f"Pipeline command failed: {cmd_str} (exit code: {proc.returncode})"
+                    if proc.stderr:
+                        try:
+                            stderr_data = proc.stderr.read().decode().strip()
+                            if stderr_data:
+                                error_msg += f" - stderr: {stderr_data}"
+                        except:
+                            pass
+                    self.logger.error(error_msg)
+                    raise subprocess.CalledProcessError(proc.returncode, cmd_str, stderr_data)
+
+            return stdout
+
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"Pipeline timed out after {timeout}s")
+            raise
+        finally:
+            # Cleanup: terminate any remaining processes
+            for proc in processes:
+                try:
+                    if proc.poll() is None:
+                        proc.terminate()
+                        proc.wait(timeout=5)
+                except:
+                    try:
+                        proc.kill()
+                    except:
+                        pass
+
+    def run_with_rate_limit(self, source_cmd: list, output_file: str | Path, rate_limit: str = None, compression_cmd: list = None) -> None:
+        """Run a command with optional rate limiting and compression to file."""
+        commands = [source_cmd]
+
+        if rate_limit:
+            commands.append(Cmd.pv(rate_limit))
+
+        if compression_cmd:
+            commands.append(compression_cmd)
+
+        with open(output_file, "wb") as f:
+            if len(commands) == 1:
+                # Simple case: just run the command and pipe to file
+                self.logger.info(f"Running: {' '.join(commands[0])} > {output_file}")
+                result = subprocess.run(commands[0], stdout=f, check=True)
+            else:
+                # Pipeline case
+                self.logger.info(f"Running pipeline: {' | '.join(' '.join(cmd) for cmd in commands)} > {output_file}")
+                # Start first process
+                proc1 = subprocess.Popen(commands[0], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                if len(commands) == 2:
+                    # source | pv > file
+                    proc2 = subprocess.Popen(commands[1], stdin=proc1.stdout, stdout=f, stderr=subprocess.PIPE)
+                    if proc1.stdout:
+                        proc1.stdout.close()
+                    _, stderr2 = proc2.communicate()
+                    proc1.wait()
+                    if proc2.returncode != 0:
+                        self.logger.error(f"Rate limiting command failed: {' '.join(commands[1])}")
+                        raise subprocess.CalledProcessError(proc2.returncode, commands[1])
+                else:
+                    # source | pv | gzip > file
+                    proc2 = subprocess.Popen(commands[1], stdin=proc1.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if proc1.stdout:
+                        proc1.stdout.close()
+                    proc3 = subprocess.Popen(commands[2], stdin=proc2.stdout, stdout=f, stderr=subprocess.PIPE)
+                    if proc2.stdout:
+                        proc2.stdout.close()
+
+                    _, stderr3 = proc3.communicate()
+                    proc2.wait()
+                    proc1.wait()
+
+                    if proc3.returncode != 0:
+                        self.logger.error(f"Compression command failed: {' '.join(commands[2])}")
+                        raise subprocess.CalledProcessError(proc3.returncode, commands[2])
+
+
 # ========== Dataclass for Args ==========
 @dataclass
 class Args:
@@ -520,42 +658,10 @@ class BackupManager(BaseManager):
                 snapshot_created = True
 
                 # Create backup with improved error handling
-                with open(tmpfile, "wb") as f:
-                    p1 = subprocess.Popen(
-                        Cmd.zfs("send", "-R", f"{self.args.dataset}@{snap}"),
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-
-                    if self.args.rate:
-                        p2 = subprocess.Popen(Cmd.pv(self.args.rate), stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        p3 = subprocess.Popen(Cmd.gzip(), stdin=p2.stdout, stdout=f, stderr=subprocess.PIPE)
-                        p1.stdout.close()
-                        p2.stdout.close()
-
-                        # Wait for all processes and check return codes
-                        _, p3_err = p3.communicate()
-                        _, p2_err = p2.communicate()
-                        _, p1_err = p1.communicate()
-
-                        if p1.returncode != 0:
-                            raise subprocess.CalledProcessError(p1.returncode, "zfs send", p1_err)
-                        if p2.returncode != 0:
-                            raise subprocess.CalledProcessError(p2.returncode, "pv", p2_err)
-                        if p3.returncode != 0:
-                            raise subprocess.CalledProcessError(p3.returncode, "gzip", p3_err)
-                    else:
-                        p2 = subprocess.Popen(Cmd.gzip(), stdin=p1.stdout, stdout=f, stderr=subprocess.PIPE)
-                        p1.stdout.close()
-
-                        # Wait for processes and check return codes
-                        _, p2_err = p2.communicate()
-                        _, p1_err = p1.communicate()
-
-                        if p1.returncode != 0:
-                            raise subprocess.CalledProcessError(p1.returncode, "zfs send", p1_err)
-                        if p2.returncode != 0:
-                            raise subprocess.CalledProcessError(p2.returncode, "gzip", p2_err)
+                source_cmd = Cmd.zfs("send", "-R", f"{self.args.dataset}@{snap}")
+                compression_cmd = Cmd.gzip()
+                pipeline = ProcessPipeline(self.logger)
+                pipeline.run_with_rate_limit(source_cmd, tmpfile, self.args.rate, compression_cmd)
 
                 # Verify backup file
                 if Path(tmpfile).stat().st_size == 0:
@@ -620,42 +726,10 @@ class BackupManager(BaseManager):
                 snapshot_created = True
 
                 # Create differential backup with improved error handling
-                with open(tmpfile, "wb") as f:
-                    p1 = subprocess.Popen(
-                        Cmd.zfs("send", "-R", "-i", base_snap, f"{self.args.dataset}@{snap}"),
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-
-                    if self.args.rate:
-                        p2 = subprocess.Popen(Cmd.pv(self.args.rate), stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        p3 = subprocess.Popen(Cmd.gzip(), stdin=p2.stdout, stdout=f, stderr=subprocess.PIPE)
-                        p1.stdout.close()
-                        p2.stdout.close()
-
-                        # Wait for all processes and check return codes
-                        _, p3_err = p3.communicate()
-                        _, p2_err = p2.communicate()
-                        _, p1_err = p1.communicate()
-
-                        if p1.returncode != 0:
-                            raise subprocess.CalledProcessError(p1.returncode, "zfs send", p1_err)
-                        if p2.returncode != 0:
-                            raise subprocess.CalledProcessError(p2.returncode, "pv", p2_err)
-                        if p3.returncode != 0:
-                            raise subprocess.CalledProcessError(p3.returncode, "gzip", p3_err)
-                    else:
-                        p2 = subprocess.Popen(Cmd.gzip(), stdin=p1.stdout, stdout=f, stderr=subprocess.PIPE)
-                        p1.stdout.close()
-
-                        # Wait for processes and check return codes
-                        _, p2_err = p2.communicate()
-                        _, p1_err = p1.communicate()
-
-                        if p1.returncode != 0:
-                            raise subprocess.CalledProcessError(p1.returncode, "zfs send", p1_err)
-                        if p2.returncode != 0:
-                            raise subprocess.CalledProcessError(p2.returncode, "gzip", p2_err)
+                source_cmd = Cmd.zfs("send", "-R", "-i", base_snap, f"{self.args.dataset}@{snap}")
+                compression_cmd = Cmd.gzip()
+                pipeline = ProcessPipeline(self.logger)
+                pipeline.run_with_rate_limit(source_cmd, tmpfile, self.args.rate, compression_cmd)
 
                 # Verify backup file
                 if Path(tmpfile).stat().st_size == 0:
@@ -765,25 +839,13 @@ If this is not what you want, press Ctrl-C now.
         for f in files:
             self.logger.always(f"Restore {f}")
             if not self.dry_run:
-                gunzip = subprocess.Popen(Cmd.gunzip(str(f)), stdout=subprocess.PIPE)
-                zfs_recv = subprocess.Popen(
-                    Cmd.zfs("receive", "-F", dest),
-                    stdin=gunzip.stdout,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                # Close parent's reference to gunzip stdout so zfs_recv sees EOF properly
-                if gunzip.stdout is not None:
-                    gunzip.stdout.close()
-
-                recv_stdout, recv_stderr = zfs_recv.communicate()
-                gunzip_rc = gunzip.wait()
-
-                if zfs_recv.returncode != 0:
-                    self.logger.error(recv_stderr.decode() if isinstance(recv_stderr, (bytes, bytearray)) else str(recv_stderr))
-                    raise FatalError(f"zfs receive failed for {f.name}")
-                if gunzip_rc != 0:
-                    raise FatalError(f"gunzip failed for {f.name} (rc={gunzip_rc})")
+                # Use pipeline for restore: gunzip | zfs receive
+                pipeline = ProcessPipeline(self.logger)
+                commands = [Cmd.gunzip(str(f)), Cmd.zfs("receive", "-F", dest)]
+                try:
+                    pipeline.run_pipeline(commands)
+                except subprocess.CalledProcessError as e:
+                    raise FatalError(f"Restore failed for {f.name}: {e}")
             else:
                 self.logger.always(f"Dry-run: Would restore {f} to {dest}")
         self.logger.always("Restore done")

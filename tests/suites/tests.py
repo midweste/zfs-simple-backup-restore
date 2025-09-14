@@ -800,7 +800,14 @@ class TestSuite(TestBase):
                     # pv or others succeed
                     return MockProc(returncode=0, communicate_ret=(b"", b""), stdout=io.BytesIO(b""))
 
-                with self.patched(subprocess, "Popen", fake_popen):
+                # Use the central patched_pipeline helper to simulate gzip failure.
+                def gzip_side(source_cmd, tmpfile, rate, compression_cmd):
+                    # create tmpfile (pipeline started) then fail to simulate compression error
+                    Path(tmpfile).parent.mkdir(parents=True, exist_ok=True)
+                    Path(tmpfile).write_bytes(b"streamdata")
+                    raise Exception("gzip error")
+
+                with self.patched_pipeline(run_side_effect=gzip_side) as mock_pipeline:
                     try:
                         manager.backup_full()
                         assert False, "Expected FatalError due to gzip failure"
@@ -1089,18 +1096,88 @@ class TestSuite(TestBase):
 
     def test_logger_init_handles_journal_import_failure(self):
         """Test Logger.__init__ handles systemd journal import failure gracefully."""
-        # Skip this test for now as it's complex to mock properly
-        pass
+        from unittest.mock import patch
+        import builtins
+
+        # Mock the systemd import to raise ImportError
+        original_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "systemd":
+                raise ImportError("No module named 'systemd'")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=mock_import):
+            logger = Logger(verbose=True)
+            assert logger.journal is None
+            assert logger.journal_available == False
+            assert logger.verbose == True
 
     def test_zfs_verify_backup_file_handles_subprocess_errors(self):
         """Test ZFS.verify_backup_file handles subprocess errors in zstreamdump calls."""
-        # Skip this test for now as it's complex to mock properly
-        pass
+        import subprocess
+        from unittest.mock import Mock
+        from pathlib import Path
+
+        with self.tempdir() as td:
+            backup_file = Path(td) / "test.zfs.gz"
+            backup_file.write_bytes(b"fake backup data")
+
+            # Mock subprocess.Popen to simulate zstreamdump failure
+            mock_proc = Mock()
+            mock_proc.returncode = 1  # Simulate failure
+            mock_proc.communicate.return_value = (b"", b"zstreamdump error")
+            mock_proc.stdout = None
+            mock_proc.stderr = None
+
+            def mock_popen(cmd, **kwargs):
+                # cmd may be a list like ['/usr/bin/zstreamdump', '-v'] or similar.
+                try:
+                    is_zstream = any("zstreamdump" in str(c) for c in cmd)
+                except Exception:
+                    is_zstream = "zstreamdump" in str(cmd)
+                if is_zstream:
+                    return mock_proc
+                # For gunzip and head, return successful mocks
+                success_proc = Mock()
+                success_proc.returncode = 0
+                success_proc.communicate.return_value = (b"fake data", b"")
+                success_proc.stdout = Mock()
+                return success_proc
+
+            with self.patched(subprocess, "Popen", mock_popen):
+                result = ZFS.verify_backup_file(backup_file, self.logger)
+                assert result == False
 
     def test_zfs_verify_backup_file_handles_file_not_found(self):
         """Test ZFS.verify_backup_file handles missing zstreamdump binary."""
-        # Skip this test for now as it's complex to mock properly
-        pass
+        import subprocess
+        from unittest.mock import Mock
+        from pathlib import Path
+
+        with self.tempdir() as td:
+            backup_file = Path(td) / "test.zfs.gz"
+            backup_file.write_bytes(b"fake backup data")
+
+            # Mock subprocess.Popen to raise FileNotFoundError for zstreamdump
+            def mock_popen(cmd, **kwargs):
+                # cmd may be list; detect zstreamdump by substring match
+                try:
+                    is_zstream = any("zstreamdump" in str(c) for c in cmd)
+                except Exception:
+                    is_zstream = "zstreamdump" in str(cmd)
+                if is_zstream:
+                    raise FileNotFoundError("zstreamdump command not found")
+                # For gunzip and head, return successful mocks
+                success_proc = Mock()
+                success_proc.returncode = 0
+                success_proc.communicate.return_value = (b"fake data", b"")
+                success_proc.stdout = Mock()
+                return success_proc
+
+            with self.patched(subprocess, "Popen", mock_popen):
+                result = ZFS.verify_backup_file(backup_file, self.logger)
+                assert result == False
 
     def test_basemanager_validation_handles_missing_dataset(self):
         """Test BaseManager validation handles missing dataset."""
@@ -1168,13 +1245,60 @@ class TestSuite(TestBase):
 
     def test_backup_manager_backup_full_backup_success(self):
         """Test successful full backup execution with all subprocess calls."""
-        # Skip this test for now as it's complex to mock properly
-        pass
+        import subprocess
+        from unittest.mock import Mock, patch
+        from pathlib import Path
+
+        with self.tempdir() as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+
+            # Ensure target directory exists and no last_chain file
+            manager.target_dir.mkdir(parents=True, exist_ok=True)
+            if manager.last_chain_file.exists():
+                manager.last_chain_file.unlink()
+
+            # Mock ZFS methods
+            with self.patched(ZFS, "run", lambda *a, **kw: None):
+                with self.patched(ZFS, "verify_backup_file", lambda *a, **kw: True):
+                    # Use central patched_pipeline helper to get a mock pipeline whose
+                    # run_with_rate_limit writes a tmpfile by default.
+                    with self.patched_pipeline() as mock_pipeline:
+                        manager.backup()
+                        mock_pipeline.run_with_rate_limit.assert_called_once()
 
     def test_backup_manager_backup_differential_success(self):
         """Test successful differential backup execution."""
-        # Skip this test for now as it's complex to mock properly
-        pass
+        import subprocess
+        from unittest.mock import Mock, patch
+        from pathlib import Path
+
+        with self.tempdir() as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+
+            # Ensure target directory exists
+            manager.target_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create a fake last_chain file to trigger differential backup
+            last_chain_file = manager.last_chain_file
+            last_chain_file.parent.mkdir(parents=True, exist_ok=True)
+            last_chain_file.write_text("chain-20241231")
+
+            # Create fake chain directory with a full backup file
+            chain_dir = manager.target_dir / "chain-20241231"
+            chain_dir.mkdir(parents=True, exist_ok=True)
+            full_backup = chain_dir / "TEST-full-20241231120000.zfs.gz"
+            full_backup.write_bytes(b"fake backup data")
+
+            # Mock ZFS methods. Ensure snapshot existence check returns True so differential path is used.
+            with self.patched(ZFS, "run", lambda *a, **kw: None):
+                with self.patched(ZFS, "verify_backup_file", lambda *a, **kw: True):
+                    with self.patched(ZFS, "is_snapshot_exists", lambda ds, snap: True):
+                        # Use central patched_pipeline helper to get a mock pipeline
+                        with self.patched_pipeline() as mock_pipeline:
+                            manager.backup()
+                            mock_pipeline.run_with_rate_limit.assert_called_once()
 
     def test_backup_manager_backup_handles_rate_limiting(self):
         """Test backup with rate limiting (pv command)."""
