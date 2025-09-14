@@ -103,20 +103,36 @@ class Logger:
 # ========== Cmd Class ==========
 class Cmd:
     @staticmethod
+    def _which(name: str) -> str | None:
+        """Find executable in PATH or common sbin locations.
+
+        This helps when cron provides a limited PATH that doesn't include /sbin or /usr/sbin.
+        """
+        p = shutil.which(name)
+        if p:
+            return p
+        # check common sbin locations
+        for prefix in ("/sbin", "/usr/sbin", "/usr/local/sbin"):
+            candidate = os.path.join(prefix, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        return None
+
+    @staticmethod
     def zfs(*args):
-        return [shutil.which("zfs") or "zfs"] + list(args)
+        return [Cmd._which("zfs") or "zfs"] + list(args)
 
     @staticmethod
     def zpool(*args):
-        return [shutil.which("zpool") or "zpool"] + list(args)
+        return [Cmd._which("zpool") or "zpool"] + list(args)
 
     @staticmethod
     def pv(rate):
-        return [shutil.which("pv") or "pv", "-q", "-L", rate] if rate else []
+        return [Cmd._which("pv") or "pv", "-q", "-L", rate] if rate else []
 
     @staticmethod
     def gzip(*args):
-        pigz_path = shutil.which("pigz")
+        pigz_path = Cmd._which("pigz")
         # Check if pigz actually exists and works
         if pigz_path:
             try:
@@ -124,7 +140,7 @@ class Cmd:
                 return [pigz_path] + list(args)
             except Exception:
                 pass
-        return [shutil.which("gzip") or "gzip"] + list(args)
+        return [Cmd._which("gzip") or "gzip"] + list(args)
 
     @staticmethod
     def gunzip(*args):
@@ -132,7 +148,11 @@ class Cmd:
 
     @staticmethod
     def zstreamdump(*args):
-        return [shutil.which("zstreamdump") or "zstreamdump"] + list(args)
+        return [Cmd._which("zstreamdump") or "zstreamdump"] + list(args)
+
+    @staticmethod
+    def head(*args):
+        return [Cmd._which("head") or "head"] + list(args)
 
     @staticmethod
     def required_binaries(rate=None):
@@ -145,7 +165,7 @@ class Cmd:
     def has_required_binaries(logger, rate=None):
         missing = []
         for binary in Cmd.required_binaries(rate):
-            if not shutil.which(binary):
+            if not Cmd._which(binary):
                 missing.append(binary)
 
         if missing:
@@ -345,7 +365,7 @@ class ZFS:
                 stderr=subprocess.PIPE,
             )
 
-            head_cmd = [shutil.which("head") or "head", "-c", "1024"]
+            head_cmd = Cmd.head("-c", "1024")
             head_proc = subprocess.Popen(
                 head_cmd,
                 stdin=gunzip_proc.stdout,
