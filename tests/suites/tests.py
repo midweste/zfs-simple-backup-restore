@@ -331,6 +331,14 @@ class TestSuite(TestBase):
         assert CONFIG.SCRIPT_ID in df
         assert kd in df
 
+        # Test with env vars set
+        import os
+        with self.patched(os, "environ", {"ZFS_BACKUP_LOG_DIR": "/custom/log", "ZFS_BACKUP_LOCK_DIR": "/custom/lock"}):
+            assert CONFIG.get_log_dir() == "/custom/log"
+            assert CONFIG.get_lock_dir() == "/custom/lock"
+            df_custom = CONFIG.get_default_lockfile()
+            assert "/custom/lock" in df_custom
+
     def test_cmd_pv_and_gzip_behavior(self):
         import shutil
         import subprocess
@@ -1094,6 +1102,10 @@ class TestSuite(TestBase):
             logger = Logger(verbose=True)
             assert logger.log_file is None
             assert logger.verbose == True
+            # Test that logging methods don't crash when log_file is None
+            logger.info("Test info")
+            logger.always("Test always")
+            logger.error("Test error")
 
     def test_logger_init_handles_journal_import_failure(self):
         """Test Logger.__init__ handles systemd journal import failure gracefully."""
