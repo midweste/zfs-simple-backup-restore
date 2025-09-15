@@ -33,6 +33,7 @@ from zfs_simple_backup_restore import (
     Main,
     RestoreManager,
     ZFS,
+    ProcessPipeline,
 )
 
 from zfs_simple_backup_restore import ValidationError
@@ -1119,26 +1120,85 @@ class TestSuite(TestBase):
         from unittest.mock import Mock
         from pathlib import Path
 
+    def test_logger_with_systemd_journal(self):
+        """Exercise Logger path when systemd.journal is available."""
+
+        # Insert a fake systemd.journal module to exercise the journal send path
+        class FakeJournal:
+            LOG_INFO = 6
+            LOG_ERR = 3
+
+            @staticmethod
+            def send(msg, **kw):
+                FakeJournal.last = (msg, kw)
+
+        import sys
+
+        sys.modules.setdefault("systemd", type("M", (), {})())
+        sys.modules["systemd"].journal = FakeJournal
+
+        logger = Logger(verbose=True)
+        logger.info("info-msg")
+        logger.always("always-msg")
+        logger.error("err-msg")
+        assert hasattr(FakeJournal, "last")
+
+    def test_zfs_verify_backup_file_timeout(self):
+        """Ensure verify_backup_file returns False when zstreamdump times out and when zstreamdump fails."""
+        from pathlib import Path
+        import subprocess as _sub
+        import io
+        from unittest.mock import Mock
+
+        # Case 1: zstreamdump times out
+        with self.tempdir() as td:
+            f = Path(td) / "fake.zfs.gz"
+            f.write_bytes(b"notreallygz")
+
+            class MockPopen:
+                def __init__(self, cmd, stdin=None, stdout=None, stderr=None, **kw):
+                    self.cmd = cmd
+                    try:
+                        self.stdout = io.BytesIO(b"data")
+                    except Exception:
+                        self.stdout = None
+                    self.stderr = io.BytesIO(b"")
+                    self.returncode = 0
+
+                def communicate(self, timeout=None):
+                    cmdstr = " ".join(self.cmd if isinstance(self.cmd, (list, tuple)) else [str(self.cmd)])
+                    if "zstreamdump" in cmdstr:
+                        raise _sub.TimeoutExpired(cmdstr, timeout or 1)
+                    return (b"", b"")
+
+            orig_popen = _sub.Popen
+            _sub.Popen = MockPopen
+            try:
+                ok = ZFS.verify_backup_file(f, self.logger)
+                assert ok is False
+            finally:
+                _sub.Popen = orig_popen
+
+        # Case 2: zstreamdump present but returns non-zero
+        import subprocess
+
         with self.tempdir() as td:
             backup_file = Path(td) / "test.zfs.gz"
             backup_file.write_bytes(b"fake backup data")
 
-            # Mock subprocess.Popen to simulate zstreamdump failure
             mock_proc = Mock()
-            mock_proc.returncode = 1  # Simulate failure
+            mock_proc.returncode = 1
             mock_proc.communicate.return_value = (b"", b"zstreamdump error")
             mock_proc.stdout = None
             mock_proc.stderr = None
 
             def mock_popen(cmd, **kwargs):
-                # cmd may be a list like ['/usr/bin/zstreamdump', '-v'] or similar.
                 try:
                     is_zstream = any("zstreamdump" in str(c) for c in cmd)
                 except Exception:
                     is_zstream = "zstreamdump" in str(cmd)
                 if is_zstream:
                     return mock_proc
-                # For gunzip and head, return successful mocks
                 success_proc = Mock()
                 success_proc.returncode = 0
                 success_proc.communicate.return_value = (b"fake data", b"")
@@ -1148,6 +1208,279 @@ class TestSuite(TestBase):
             with self.patched(subprocess, "Popen", mock_popen):
                 result = ZFS.verify_backup_file(backup_file, self.logger)
                 assert result == False
+
+    def test_backup_differential_calls_backup_full_when_snapshot_missing(self):
+        """If base full exists but snapshot is missing, backup_differential should call backup_full()."""
+        from unittest.mock import Mock
+
+        with self.tempdir() as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+            # prepare last_chain and full file
+            manager.target_dir.mkdir(parents=True, exist_ok=True)
+            last_chain = manager.target_dir / "chain-20240101"
+            last_chain.mkdir(parents=True, exist_ok=True)
+            manager.last_chain_file.write_text("chain-20240101")
+            full_file = last_chain / "TEST-full-20240101120000.zfs.gz"
+            full_file.write_bytes(b"fake")
+
+            called = {"backup_full": False}
+
+            def fake_backup_full(self):
+                called["backup_full"] = True
+
+            with self.patched(ZFS, "is_snapshot_exists", lambda ds, snap: False):
+                with self.patched(BackupManager, "backup_full", fake_backup_full):
+                    manager.backup_differential()
+                    assert called["backup_full"] is True
+
+    def test_backup_full_cleanup_when_pipeline_fails_and_destroy_fails(self):
+        """If pipeline fails during full backup, tmpfile should be removed and destroy cleanup error path exercised."""
+        from unittest.mock import Mock
+
+        with self.tempdir() as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+
+            # Patch ProcessPipeline.run_with_rate_limit to write a tmpfile then raise
+            def fake_run_with_rate_limit(source_cmd, tmpfile, rate, compression_cmd):
+                # create the tmpfile to simulate a partially-written file
+                Path(tmpfile).write_bytes(b"partial")
+                raise Exception("pipeline-boom")
+
+            # Patch ZFS.run so snapshot creation succeeds but destroy raises
+            def fake_zfs_run(cmd, logger, dry_run=False):
+                cmd_str = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+                if "snapshot" in cmd_str:
+                    return None
+                if "destroy" in cmd_str:
+                    raise Exception("destroy-boom")
+                return None
+
+            with self.patched(ProcessPipeline, "run_with_rate_limit", fake_run_with_rate_limit):
+                with self.patched(ZFS, "run", fake_zfs_run):
+                    try:
+                        manager.backup_full()
+                        assert False, "Expected FatalError from backup_full"
+                    except FatalError:
+                        # Ensure tmpfile was cleaned up (run_with_rate_limit created then code removed it)
+                        # The chain dir should exist but no tmp files remain
+                        # We can't know the exact snap name, but ensure no .tmp files exist under target_dir
+                        tmp_tmps = list(manager.target_dir.rglob("*.tmp"))
+                        assert not tmp_tmps, f"Found leftover tmp files: {tmp_tmps}"
+
+    def test_backup_full_cleanup_when_pipeline_fails_and_destroy_succeeds(self):
+        """If pipeline fails during full backup, tmpfile should be removed and destroy success path exercised."""
+        from unittest.mock import Mock
+
+        with self.tempdir() as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+
+            # Patch ProcessPipeline.run_with_rate_limit to write a tmpfile then raise
+            def fake_run_with_rate_limit(source_cmd, tmpfile, rate, compression_cmd):
+                Path(tmpfile).write_bytes(b"partial")
+                raise Exception("pipeline-boom")
+
+            # Patch ZFS.run so snapshot creation and destroy both succeed
+            def fake_zfs_run_ok(cmd, logger, dry_run=False):
+                return None
+
+            with self.patched(ProcessPipeline, "run_with_rate_limit", fake_run_with_rate_limit):
+                with self.patched(ZFS, "run", fake_zfs_run_ok):
+                    try:
+                        manager.backup_full()
+                        assert False, "Expected FatalError from backup_full"
+                    except FatalError:
+                        # Ensure tmpfile was cleaned up
+                        tmp_tmps = list(manager.target_dir.rglob("*.tmp"))
+                        assert not tmp_tmps, f"Found leftover tmp files: {tmp_tmps}"
+
+    def test_backup_full_success_path_creates_final_file_and_writes_last_chain(self):
+        """Simulate a successful full backup pipeline and verify final file exists and last_chain_file updated."""
+        from unittest.mock import Mock
+
+        with self.tempdir() as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+
+            # Simulate run_with_rate_limit writing a tmpfile successfully
+            def fake_run_with_rate_limit(self, source_cmd, tmpfile, rate, compression_cmd):
+                Path(tmpfile).write_bytes(b"valid zfs stream")
+                return None
+
+            # Ensure snapshot creation succeeds and destroy not needed
+            def fake_zfs_run_ok(cmd, logger, dry_run=False):
+                return None
+
+            # Ensure verification returns True
+            def fake_verify(path, logger):
+                return True
+
+            with self.patched(ProcessPipeline, "run_with_rate_limit", fake_run_with_rate_limit):
+                with self.patched(ZFS, "run", fake_zfs_run_ok):
+                    with self.patched(ZFS, "verify_backup_file", fake_verify):
+                        manager.backup_full()
+
+            # After successful run, ensure final .zfs.gz exists in the today's chain dir
+            chain_name = manager.chain.today()
+            chain_dir = manager.target_dir / chain_name
+            files = list(chain_dir.glob(f"{manager.prefix}-full-*.zfs.gz"))
+            assert files, f"Expected final backup file in {chain_dir}, found none"
+            # last_chain_file should be written with current chain name
+            assert manager.last_chain_file.read_text().strip() == chain_name
+
+    def test_backup_full_empty_tmpfile_triggers_cleanup(self):
+        """If pipeline produces an empty tmpfile, backup_full should clean it up and raise FatalError."""
+        from unittest.mock import Mock
+
+        with self.tempdir() as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+
+            # Simulate run_with_rate_limit creating an empty tmpfile
+            def fake_run_with_rate_limit(self, source_cmd, tmpfile, rate, compression_cmd):
+                Path(tmpfile).write_bytes(b"")
+                return None
+
+            def fake_zfs_run_ok(cmd, logger, dry_run=False):
+                return None
+
+            # verify_backup_file should not be called (empty), but patch to be safe
+            def fake_verify(path, logger):
+                return True
+
+            with self.patched(ProcessPipeline, "run_with_rate_limit", fake_run_with_rate_limit):
+                with self.patched(ZFS, "run", fake_zfs_run_ok):
+                    with self.patched(ZFS, "verify_backup_file", fake_verify):
+                        try:
+                            manager.backup_full()
+                            assert False, "Expected FatalError due to empty tmpfile"
+                        except FatalError:
+                            # Ensure no .tmp files left
+                            tmp_tmps = list(manager.target_dir.rglob("*.tmp"))
+                            assert not tmp_tmps, f"Found leftover tmp files: {tmp_tmps}"
+
+    def test_backup_full_verification_failure_triggers_cleanup(self):
+        """If verification fails after pipeline, backup_full should clean up and raise FatalError."""
+        from unittest.mock import Mock
+
+        with self.tempdir() as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+
+            def fake_run_with_rate_limit(self, source_cmd, tmpfile, rate, compression_cmd):
+                Path(tmpfile).write_bytes(b"not a valid stream")
+                return None
+
+            def fake_zfs_run_ok(cmd, logger, dry_run=False):
+                return None
+
+            def fake_verify_false(path, logger):
+                return False
+
+            with self.patched(ProcessPipeline, "run_with_rate_limit", fake_run_with_rate_limit):
+                with self.patched(ZFS, "run", fake_zfs_run_ok):
+                    with self.patched(ZFS, "verify_backup_file", fake_verify_false):
+                        try:
+                            manager.backup_full()
+                            assert False, "Expected FatalError due to verification failure"
+                        except FatalError:
+                            tmp_tmps = list(manager.target_dir.rglob("*.tmp"))
+                            assert not tmp_tmps, f"Found leftover tmp files: {tmp_tmps}"
+
+    def test_backup_full_dry_run_writes_last_chain_no_files(self):
+        """When dry_run=True, backup_full should not create backup files but should write last_chain_file."""
+        from pathlib import Path
+
+        with self.tempdir() as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=True)
+            manager = BackupManager(args, self.logger)
+
+            # Ensure run_with_rate_limit is not called by leaving it unpatched; snapshot/pipeline should be skipped
+            manager.backup_full()
+
+            # chain dir should exist but no .zfs.gz files created
+            chain_name = manager.chain.today()
+            chain_dir = manager.target_dir / chain_name
+            assert chain_dir.exists(), f"Expected chain dir {chain_dir} to exist"
+            files = list(chain_dir.glob("*.zfs.gz"))
+            assert not files, f"Did not expect final backup files in dry-run, found: {files}"
+            # last_chain_file should be written
+            assert manager.last_chain_file.read_text().strip() == chain_name
+
+    def test_backup_full_verify_raises_exception_triggers_cleanup_and_destroy_called(self):
+        """If verify raises, ensure tmpfile cleaned and destroy called during cleanup."""
+        from unittest.mock import Mock
+        from pathlib import Path
+
+        with self.tempdir() as td:
+            args = Args(action="backup", dataset="rpool/test", mount_point=str(td), prefix="TEST", dry_run=False)
+            manager = BackupManager(args, self.logger)
+
+            # Create a tmpfile via run_with_rate_limit
+            def fake_run_with_rate_limit(self, source_cmd, tmpfile, rate, compression_cmd):
+                Path(tmpfile).write_bytes(b"some-data")
+                return None
+
+            calls = []
+
+            def fake_zfs_run_recorder(cmd, logger, dry_run=False):
+                calls.append(" ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd))
+                return None
+
+            def fake_verify_raises(path, logger):
+                raise Exception("verify-boom")
+
+            with self.patched(ProcessPipeline, "run_with_rate_limit", fake_run_with_rate_limit):
+                with self.patched(ZFS, "run", fake_zfs_run_recorder):
+                    with self.patched(ZFS, "verify_backup_file", fake_verify_raises):
+                        try:
+                            manager.backup_full()
+                            assert False, "Expected FatalError due to verify exception"
+                        except FatalError:
+                            # tmp .tmp files should be removed
+                            tmp_tmps = list(manager.target_dir.rglob("*.tmp"))
+                            assert not tmp_tmps, f"Found leftover tmp files: {tmp_tmps}"
+                            # destroy should have been attempted (look for 'destroy' in recorded commands)
+                            assert any("destroy" in c for c in calls), f"Expected destroy to be called in cleanup, calls: {calls}"
+
+    def test_main_run_handles_validation_and_unexpected_errors(self):
+        """Main.run should exit with the correct code on ValidationError and other Exceptions."""
+        import sys
+        from unittest.mock import Mock
+
+        main = Main()
+        # supply minimal args/logger
+        main.args = Args(action="backup", dataset="rpool/test", mount_point="/tmp")
+        main.logger = self.logger
+
+        # Case A: ValidationError
+        def fake_parse_args(self):
+            return None
+
+        def fake_validate_bad(self):
+            raise ValidationError("bad")
+
+        with self.patched(Main, "parse_args", fake_parse_args):
+            with self.patched(Main, "validate", fake_validate_bad):
+                try:
+                    main.run()
+                    assert False, "Should have exited"
+                except SystemExit as e:
+                    assert e.code == CONFIG.EXIT_INVALID_ARGS
+
+        # Case B: unexpected Exception
+        def fake_validate_boom(self):
+            raise Exception("boom")
+
+        with self.patched(Main, "parse_args", fake_parse_args):
+            with self.patched(Main, "validate", fake_validate_boom):
+                try:
+                    main.run()
+                    assert False, "Should have exited"
+                except SystemExit as e:
+                    assert e.code == CONFIG.EXIT_INVALID_ARGS
 
     def test_zfs_verify_backup_file_handles_file_not_found(self):
         """Test ZFS.verify_backup_file handles missing zstreamdump binary."""
