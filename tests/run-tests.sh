@@ -23,6 +23,10 @@ vagrant up
 
 set -o pipefail
 echo "=== Running test suite ==="
-# Run the test suite as root inside the VM so destructive tests can access ZFS
+# Run the test suite under coverage as root inside the VM so destructive tests can access ZFS
 # Use sudo -E to preserve the environment variables (RUN_TESTS, PYTHONPATH)
-vagrant ssh -c "cd /vagrant && sudo -E env RUN_TESTS=1 PYTHONPATH=/vagrant python3 tests/suites/tests.py"
+vagrant ssh -c "cd /vagrant && sudo -E env RUN_TESTS=1 PYTHONPATH=/vagrant:/vagrant/tests/suites bash -lc 'python3 -m coverage run --source=zfs_simple_backup_restore tests/suites/tests.py'"
+
+echo
+echo "=== Coverage: missing lines ==="
+vagrant ssh -c "cd /vagrant && sudo -E env PYTHONPATH=/vagrant:/vagrant/tests/suites bash -lc 'python3 -m coverage report --skip-covered --show-missing'"

@@ -1179,6 +1179,248 @@ class TestSuite(TestBase):
                 result = ZFS.verify_backup_file(backup_file, self.logger)
                 assert result == False
 
+    def test_processpipeline_run_simple_calledprocesserror(self):
+        """ProcessPipeline.run_simple should log and re-raise CalledProcessError."""
+        import subprocess
+
+        from zfs_simple_backup_restore import ProcessPipeline
+
+        pipeline = ProcessPipeline(self.logger)
+
+        def fake_run(*a, **kw):
+            raise subprocess.CalledProcessError(2, a[0], stderr=b"failure")
+
+        with self.patched(subprocess, "run", fake_run):
+            try:
+                pipeline.run_simple(["false"])
+                assert False, "Expected CalledProcessError"
+            except subprocess.CalledProcessError:
+                pass
+
+    def test_processpipeline_run_simple_timeout_and_filenotfound(self):
+        """ProcessPipeline.run_simple should handle TimeoutExpired and FileNotFoundError."""
+        import subprocess
+
+        from zfs_simple_backup_restore import ProcessPipeline
+
+        pipeline = ProcessPipeline(self.logger)
+
+        # TimeoutExpired
+        def fake_run_timeout(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd=a[0], timeout=1)
+
+        with self.patched(subprocess, "run", fake_run_timeout):
+            try:
+                pipeline.run_simple(["sleep"])
+                assert False, "Expected TimeoutExpired"
+            except subprocess.TimeoutExpired:
+                pass
+
+        # FileNotFoundError
+        def fake_run_notfound(*a, **kw):
+            raise FileNotFoundError()
+
+        with self.patched(subprocess, "run", fake_run_notfound):
+            try:
+                pipeline.run_simple(["no-such-cmd"])
+                assert False, "Expected FileNotFoundError"
+            except FileNotFoundError:
+                pass
+
+    def test_processpipeline_run_pipeline_no_commands_and_proc_error(self):
+        """Run pipeline with no commands should raise ValueError; failing proc should raise CalledProcessError."""
+        import subprocess
+        import io
+
+        from zfs_simple_backup_restore import ProcessPipeline
+
+        pipeline = ProcessPipeline(self.logger)
+
+        # No commands
+        try:
+            pipeline.run_pipeline([])
+            assert False, "Expected ValueError for no commands"
+        except ValueError:
+            pass
+
+        # Simulate a failing process in the pipeline
+        class MockProc:
+            def __init__(self, returncode=0, stdout=None, stderr=None, communicate_ret=(b"", b"err")):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr or io.BytesIO(b"err")
+                self._communicate_ret = communicate_ret
+
+            def communicate(self, timeout=None):
+                return self._communicate_ret
+
+            def wait(self):
+                return self.returncode
+
+        call_idx = {"i": 0}
+
+        def fake_popen(cmd, stdin=None, stdout=None, stderr=None, **kw):
+            # first process: provides stdout pipe
+            if call_idx["i"] == 0:
+                p = MockProc(returncode=0, stdout=io.BytesIO(b"data"), communicate_ret=(b"", b""))
+            else:
+                # last process fails
+                p = MockProc(returncode=1, stdout=None, communicate_ret=(b"", b"err"))
+            call_idx["i"] += 1
+            return p
+
+        with self.patched(subprocess, "Popen", fake_popen):
+            try:
+                pipeline.run_pipeline([["echo"], ["false"]])
+                assert False, "Expected CalledProcessError from failing pipeline proc"
+            except subprocess.CalledProcessError:
+                pass
+
+    def test_run_with_rate_limit_single_command_uses_run(self):
+        """run_with_rate_limit should call subprocess.run for single-command case."""
+        import subprocess
+
+        from zfs_simple_backup_restore import ProcessPipeline
+
+        pipeline = ProcessPipeline(self.logger)
+
+        called = {"cmd": None}
+
+        def fake_run(cmd, stdout=None, check=False, **kw):
+            called["cmd"] = cmd
+
+            class R:
+                pass
+
+            return R()
+
+        with self.patched(subprocess, "run", fake_run):
+            with self.tempdir(prefix="rwl-") as td:
+                out = Path(td) / "out.tmp"
+                pipeline.run_with_rate_limit(["/bin/echo", "hi"], out, rate_limit=None, compression_cmd=None)
+                assert called["cmd"] is not None
+
+    def test_processpipeline_run_pipeline_intermediate_proc_error_logs_and_raises(self):
+        """Simulate an intermediate pipeline process failing with stderr and ensure CalledProcessError is raised."""
+        import subprocess
+        import io
+
+        from zfs_simple_backup_restore import ProcessPipeline
+
+        pipeline = ProcessPipeline(self.logger)
+
+        class MockProc:
+            def __init__(self, returncode=0, stdout=None, stderr=b"", communicate_ret=(b"", b"")):
+                self.returncode = returncode
+                self.stdout = stdout
+                # stderr should be file-like for .read()
+                self.stderr = io.BytesIO(stderr) if stderr is not None else None
+                self._communicate_ret = communicate_ret
+
+            def communicate(self, timeout=None):
+                return self._communicate_ret
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        call = {"i": 0}
+
+        def fake_popen(cmd, stdin=None, stdout=None, stderr=None, **kw):
+            # first process: success with stdout pipe
+            if call["i"] == 0:
+                p = MockProc(returncode=0, stdout=io.BytesIO(b"data"), communicate_ret=(b"", b""))
+            elif call["i"] == 1:
+                # intermediate process fails
+                p = MockProc(returncode=1, stdout=io.BytesIO(b""), stderr=b"intermediate error", communicate_ret=(b"", b"intermediate error"))
+            else:
+                # final process
+                p = MockProc(returncode=0, stdout=None, communicate_ret=(b"ok", b""))
+            call["i"] += 1
+            return p
+
+        with self.patched(subprocess, "Popen", fake_popen):
+            try:
+                pipeline.run_pipeline([["first"], ["intermediate"], ["final"]])
+                assert False, "Expected CalledProcessError from intermediate failing process"
+            except subprocess.CalledProcessError:
+                pass
+
+    def test_processpipeline_run_pipeline_timeout_triggers_cleanup(self):
+        """If final process.communicate raises TimeoutExpired, the pipeline should propagate it and cleanup."""
+        import subprocess
+        import io
+
+        from zfs_simple_backup_restore import ProcessPipeline
+
+        pipeline = ProcessPipeline(self.logger)
+
+        class FastProc:
+            def __init__(self):
+                self.returncode = 0
+                self.stdout = io.BytesIO(b"data")
+
+            def communicate(self, timeout=None):
+                return (b"", b"")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        class SlowFinalProc:
+            def __init__(self):
+                self.returncode = None
+                self.stdout = None
+                self.stderr = io.BytesIO(b"")
+
+            def communicate(self, timeout=None):
+                raise subprocess.TimeoutExpired(cmd="final", timeout=timeout)
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        call = {"i": 0}
+
+        def fake_popen(cmd, stdin=None, stdout=None, stderr=None, **kw):
+            if call["i"] < 2:
+                p = FastProc()
+            else:
+                p = SlowFinalProc()
+            call["i"] += 1
+            return p
+
+        with self.patched(subprocess, "Popen", fake_popen):
+            try:
+                pipeline.run_pipeline([["a"], ["b"], ["final"]], timeout=0.1)
+                assert False, "Expected TimeoutExpired"
+            except subprocess.TimeoutExpired:
+                pass
+
     def test_basemanager_validation_handles_missing_dataset(self):
         """Test BaseManager validation handles missing dataset."""
         import os
