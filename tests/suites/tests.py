@@ -1511,6 +1511,33 @@ class TestSuite(TestBase):
                 except SystemExit as e:
                     assert e.code == CONFIG.EXIT_INVALID_ARGS
 
+    def test_main_run_handles_unexpected_exception_from_backup_manager(self):
+        """Main.run should catch unexpected exceptions from BackupManager.backup and exit."""
+        import sys
+        from unittest.mock import Mock
+
+        main = Main()
+        main.args = Args(action="backup", dataset="rpool/test", mount_point="/tmp")
+        main.logger = self.logger
+
+        def fake_parse_args(self):
+            pass
+
+        def fake_validate(self):
+            pass
+
+        def fake_backup(self):
+            raise RuntimeError("Backup failed unexpectedly")
+
+        with self.patched(Main, "parse_args", fake_parse_args):
+            with self.patched(Main, "validate", fake_validate):
+                with self.patched(BackupManager, "backup", fake_backup):
+                    try:
+                        main.run()
+                        assert False, "Should have exited"
+                    except SystemExit as e:
+                        assert e.code == CONFIG.EXIT_INVALID_ARGS
+
     def test_zfs_verify_backup_file_handles_file_not_found(self):
         """Test ZFS.verify_backup_file handles missing zstreamdump binary."""
         import subprocess
@@ -2969,12 +2996,54 @@ class TestSuite(TestBase):
             except subprocess.CalledProcessError as e:
                 # Should still raise CalledProcessError but without stderr in the message
                 # The exception handling should gracefully handle the stderr.read() failure
-                assert "Pipeline command failed: false (exit code: 1)" in str(e)
-                # Should not include stderr since read failed
-                assert "stderr:" not in str(e)
+                assert e.returncode == 1
+                assert e.cmd == "false"
+                assert e.stderr is None
             except Exception as e:
                 # If we get a different exception, that's also fine as long as stderr.read() exception was handled
                 pass
+
+    def test_processpipeline_run_pipeline_handles_proc_stderr_none(self):
+        """Test ProcessPipeline.run_pipeline handles proc.stderr = None gracefully."""
+        import subprocess
+        import io
+
+        from zfs_simple_backup_restore import ProcessPipeline
+
+        pipeline = ProcessPipeline(self.logger)
+
+        class MockProcStderrNone:
+            def __init__(self):
+                self.returncode = 1
+                self.stdout = io.BytesIO(b"")
+                self.stderr = None  # Simulate stderr not captured
+
+            def communicate(self, timeout=None):
+                return (b"", b"")
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                pass
+
+        def fake_popen(cmd, **kwargs):
+            return MockProcStderrNone()
+
+        with self.patched(subprocess, "Popen", fake_popen):
+            try:
+                pipeline.run_pipeline([["false"]])
+                assert False, "Expected CalledProcessError"
+            except subprocess.CalledProcessError as e:
+                assert e.returncode == 1
+                assert e.cmd == "false"
+                assert e.stderr is None
 
     def test_backup_full_cleanup_skips_tmpfile_removal_when_file_missing(self):
         """Test backup_full cleanup when tmpfile doesn't exist (covers line 683 condition being False)."""

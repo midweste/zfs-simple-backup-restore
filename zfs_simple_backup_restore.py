@@ -237,13 +237,14 @@ class ProcessPipeline:
                 if proc.returncode and proc.returncode != 0:
                     cmd_str = " ".join(commands[i])
                     error_msg = f"Pipeline command failed: {cmd_str} (exit code: {proc.returncode})"
+                    stderr_data = None
                     if proc.stderr:
                         try:
                             stderr_data = proc.stderr.read().decode().strip()
                             if stderr_data:
                                 error_msg += f" - stderr: {stderr_data}"
                         except:
-                            pass
+                            stderr_data = None
                     self.logger.error(error_msg)
                     raise subprocess.CalledProcessError(proc.returncode, cmd_str, stderr_data)
 
