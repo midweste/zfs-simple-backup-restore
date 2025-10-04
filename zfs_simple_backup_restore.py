@@ -373,15 +373,19 @@ class ChainManager:
     def today(self) -> str:
         return f"chain-{datetime.now().strftime('%Y%m%d')}"
 
-    def prune_old(self, retention_chains: int, dry_run: bool = False) -> None:
+    def prune_old(self, retention_chains: int, dry_run: bool = False) -> tuple[list[Path], list[Path]]:
         chains = sorted(self.target_dir.glob("chain-*"))
-        if len(chains) > retention_chains:
-            to_delete = chains[: len(chains) - retention_chains]
-            for d in to_delete:
-                if self.is_within_backup_dir(d):
-                    self.logger.always(f"Deleting old chain folder: {d}")
-                    if not dry_run:
-                        shutil.rmtree(d, ignore_errors=True)
+        keep_count = max(retention_chains, 0)
+        retained = chains[-keep_count:] if keep_count else []
+        to_delete = [c for c in chains if c not in retained]
+
+        for d in to_delete:
+            if not self.is_within_backup_dir(d):
+                continue
+            self.logger.always(f"Deleting old chain folder: {d}")
+            if not dry_run:
+                shutil.rmtree(d, ignore_errors=True)
+
         now_ts = time.time()
         dirs_to_clean = [self.target_dir] + list(self.target_dir.glob("chain-*"))
         for d in dirs_to_clean:
@@ -395,6 +399,8 @@ class ChainManager:
                         self.logger.always(f"Removed orphaned temp file: {tmp}")
                 except Exception as e:
                     self.logger.error(f"Failed to remove temp file {tmp}: {e}")
+
+        return retained, to_delete
 
     def latest_chain_dir(self) -> Path:
         chain_dirs = sorted(self.target_dir.glob("chain-*"))
@@ -476,6 +482,30 @@ class ZFS:
             return True
         except subprocess.CalledProcessError:
             return False
+
+    @staticmethod
+    def list_snapshot_names(dataset: str, prefix: str | None = None) -> set[str]:
+        try:
+            result = subprocess.run(
+                Cmd.zfs("list", "-t", "snapshot", "-o", "name", "-H"),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError:
+            return set()
+
+        dataset_prefix = f"{dataset}@"
+        names: set[str] = set()
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or not line.startswith(dataset_prefix):
+                continue
+            snap_name = line[len(dataset_prefix) :]
+            if prefix and not snap_name.startswith(prefix):
+                continue
+            names.add(snap_name)
+        return names
 
     @staticmethod
     def run(cmd: list, logger: Logger, dry_run: bool = False, **kwargs) -> None:
@@ -610,8 +640,59 @@ class BaseManager:
         return sanitized
 
     def cleanup(self) -> None:
-        self.chain.prune_old(self.args.retention, dry_run=self.args.dry_run)
+        retained, _ = self.chain.prune_old(self.args.retention, dry_run=self.args.dry_run)
+        self._cleanup_orphaned_snapshots(retained)
         self.logger.always("Cleanup done")
+
+    def _snapshot_names_from_chains(self, chains: list[Path]) -> set[str]:
+        if not chains:
+            return set()
+
+        try:
+            latest_chain = sorted(chains)[-1]
+        except Exception as exc:
+            self.logger.error(f"Failed to determine latest chain: {exc}")
+            return set()
+
+        try:
+            files = self.chain.files(latest_chain)
+        except Exception as exc:
+            self.logger.error(f"Failed to inspect backups in {latest_chain}: {exc}")
+            return set()
+
+        full_prefix = f"{self.prefix}-full-"
+        full_files = [f for f in files if f.name.startswith(full_prefix) and f.name.endswith(".zfs.gz")]
+        if not full_files:
+            return set()
+
+        latest_full = full_files[-1]
+        snap_name = latest_full.name[: -len(".zfs.gz")]
+        return {snap_name}
+
+    def _cleanup_orphaned_snapshots(self, retained_chains: list[Path]) -> None:
+        try:
+            existing = ZFS.list_snapshot_names(self.args.dataset, prefix=self.prefix)
+        except Exception as exc:
+            self.logger.error(f"Failed to list snapshots for {self.args.dataset}: {exc}")
+            return
+
+        if not existing:
+            return
+
+        keep = self._snapshot_names_from_chains(retained_chains)
+        to_remove = sorted(existing - keep)
+
+        for snap_name in to_remove:
+            full_name = f"{self.args.dataset}@{snap_name}"
+            if self.dry_run:
+                self.logger.always(f"Dry-run: Would destroy snapshot {full_name}")
+                ZFS.run(Cmd.zfs("destroy", "-r", full_name), self.logger, dry_run=True)
+                continue
+            try:
+                ZFS.run(Cmd.zfs("destroy", "-r", full_name), self.logger, dry_run=False)
+                self.logger.always(f"Destroyed snapshot: {full_name}")
+            except subprocess.CalledProcessError as exc:
+                self.logger.error(f"Failed to destroy snapshot {full_name}: {exc}")
 
 
 # ========== BackupManager ==========
@@ -634,7 +715,8 @@ class BackupManager(BaseManager):
             self.backup_full()
         else:
             self.backup_differential()
-        self.chain.prune_old(self.args.retention, dry_run=self.args.dry_run)
+        retained, _ = self.chain.prune_old(self.args.retention, dry_run=self.args.dry_run)
+        self._cleanup_orphaned_snapshots(retained)
         self.logger.always("Backup done")
 
     def backup_full(self) -> None:

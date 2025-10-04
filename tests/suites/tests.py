@@ -453,6 +453,138 @@ class TestSuite(TestBase):
             m = BaseManager(args4, self.logger)
             assert "rpool_my-data" in str(m.target_dir)
 
+    def test_base_manager_cleanup_prunes_orphan_snapshots(self):
+        prefix = "zfs-simple-backup-restore"
+        dataset = "rpool/data"
+        with self.tempdir(prefix="bm-clean-") as mount:
+            dataset_dir = Path(mount) / "rpool_data"
+            old_chain = dataset_dir / "chain-20250918"
+            new_chain = dataset_dir / "chain-20250925"
+            old_chain.mkdir(parents=True, exist_ok=True)
+            new_chain.mkdir(parents=True, exist_ok=True)
+
+            old_full = old_chain / f"{prefix}-full-20250918070553.zfs.gz"
+            old_diff = old_chain / f"{prefix}-diff-20250918220001.zfs.gz"
+            new_full = new_chain / f"{prefix}-full-20250925220002.zfs.gz"
+            new_diff = new_chain / f"{prefix}-diff-20250926220002.zfs.gz"
+            self.write_file(old_full, b"x")
+            self.write_file(old_diff, b"x")
+            self.write_file(new_full, b"x")
+            self.write_file(new_diff, b"x")
+
+            args = Args(
+                action="cleanup",
+                dataset=dataset,
+                mount_point=str(mount),
+                retention=1,
+                prefix=prefix,
+            )
+            manager = BaseManager(args, self.logger)
+
+            destroyed: list[tuple[list[str], bool]] = []
+
+            expected_prefix = prefix
+
+            def fake_list_snapshots(dataset_arg: str, prefix: str | None = None, **_kwargs) -> set[str]:
+                self.assert_equal(dataset_arg, dataset)
+                if prefix is not None:
+                    self.assert_equal(prefix, expected_prefix)
+                return {
+                    f"{prefix}-full-20250918070553",
+                    f"{prefix}-diff-20250918220001",
+                    f"{prefix}-full-20250925220002",
+                    f"{prefix}-diff-20250926220002",
+                }
+
+            def fake_zfs_run(cmd, logger, dry_run: bool = False, **kwargs):
+                destroyed.append((cmd, dry_run))
+
+            with self.patched(ZFS, "list_snapshot_names", fake_list_snapshots):
+                with self.patched(ZFS, "run", fake_zfs_run):
+                    manager.cleanup()
+
+            self.assert_file_not_exists(old_chain)
+            self.assert_true(new_chain.is_dir(), "Expected newest chain directory to remain")
+
+            destroyed_full_paths = [" ".join(cmd) for cmd, _ in destroyed if cmd]
+            self.assert_true(len(destroyed_full_paths) == 3, "Expected three snapshot destroy commands")
+            self.assert_true(
+                any("rpool/data@zfs-simple-backup-restore-full-20250918070553" in c for c in destroyed_full_paths),
+                "Expected old full snapshot destroy",
+            )
+            self.assert_true(
+                any("rpool/data@zfs-simple-backup-restore-diff-20250918220001" in c for c in destroyed_full_paths),
+                "Expected old diff snapshot destroy",
+            )
+            self.assert_true(
+                any("rpool/data@zfs-simple-backup-restore-diff-20250926220002" in c for c in destroyed_full_paths),
+                "Expected latest diff snapshot destroy",
+            )
+            self.assert_true(
+                all("rpool/data@zfs-simple-backup-restore-full-20250925220002" not in c for c in destroyed_full_paths),
+                "Should not destroy retained chain snapshot",
+            )
+
+    def test_base_manager_cleanup_dry_run_preserves_state(self):
+        prefix = "zfs-simple-backup-restore"
+        dataset = "rpool/data"
+        with self.tempdir(prefix="bm-clean-dry-") as mount:
+            dataset_dir = Path(mount) / "rpool_data"
+            old_chain = dataset_dir / "chain-20250910"
+            new_chain = dataset_dir / "chain-20250920"
+            old_chain.mkdir(parents=True, exist_ok=True)
+            new_chain.mkdir(parents=True, exist_ok=True)
+
+            self.write_file(old_chain / f"{prefix}-full-20250910000000.zfs.gz", b"x")
+            self.write_file(new_chain / f"{prefix}-full-20250920000000.zfs.gz", b"x")
+
+            args = Args(
+                action="cleanup",
+                dataset=dataset,
+                mount_point=str(mount),
+                retention=1,
+                prefix=prefix,
+                dry_run=True,
+            )
+            manager = BaseManager(args, self.logger)
+
+            destroyed: list[tuple[list[str], bool]] = []
+
+            expected_prefix = prefix
+
+            def fake_list_snapshots(dataset_arg: str, prefix: str | None = None, **_kwargs) -> set[str]:
+                self.assert_equal(dataset_arg, dataset)
+                if prefix is not None:
+                    self.assert_equal(prefix, expected_prefix)
+                return {
+                    f"{prefix}-full-20250910000000",
+                    f"{prefix}-full-20250920000000",
+                    f"{prefix}-diff-20250921000000",
+                }
+
+            def fake_zfs_run(cmd, logger, dry_run: bool = False, **kwargs):
+                destroyed.append((cmd, dry_run))
+
+            with self.patched(ZFS, "list_snapshot_names", fake_list_snapshots):
+                with self.patched(ZFS, "run", fake_zfs_run):
+                    manager.cleanup()
+
+            self.assert_true(old_chain.is_dir(), "Dry-run should not delete chain directory")
+            self.assert_true(new_chain.is_dir(), "Dry-run should keep new chain directory")
+            self.assert_true(
+                all(dry_run for _, dry_run in destroyed),
+                "Expected destroy commands to be dry-run only",
+            )
+            destroyed_paths = [" ".join(cmd) for cmd, _ in destroyed]
+            self.assert_true(
+                any("rpool/data@zfs-simple-backup-restore-full-20250910000000" in c for c in destroyed_paths),
+                "Dry-run should plan to destroy old snapshot",
+            )
+            self.assert_true(
+                any("rpool/data@zfs-simple-backup-restore-diff-20250921000000" in c for c in destroyed_paths),
+                "Dry-run should plan to destroy diff snapshot",
+            )
+
     def test_lockfile_context_ops(self):
         with self.tempdir(prefix="locktest-") as td:
             p = Path(td) / "test.lock"
